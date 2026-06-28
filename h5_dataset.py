@@ -36,13 +36,15 @@ class RawH5CIFARDataset(Dataset):
       train: boolean split mask, True for train and False for test
     """
 
-    def __init__(self, h5_path, train, augment=False, noise=False):
+    def __init__(self, h5_path, train, augment=False, noise=False,
+                 return_index=False):
         import h5py
 
         self.h5_path = str(h5_path)
         self.train = train
         self.augment = augment
         self.noise = noise
+        self.return_index = return_index
         self._file = None
 
         with h5py.File(self.h5_path, 'r') as h5:
@@ -107,4 +109,7 @@ class RawH5CIFARDataset(Dataset):
             raw = self._augment(raw)
 
         label = int(h5['labels'][ds_idx])
-        return raw, torch.tensor(label, dtype=torch.long)
+        label = torch.tensor(label, dtype=torch.long)
+        if self.return_index:
+            return raw, label, torch.tensor(idx, dtype=torch.long)
+        return raw, label

@@ -7,13 +7,14 @@ from models.efficientnetv2 import efficientnet_v2_l
 
 
 def resolve_path(path_or_name, root='./checkpoints/'):
-    if os.path.isabs(path_or_name) or os.path.dirname(path_or_name):
-        path = path_or_name
-    else:
-        path = os.path.join(root, path_or_name)
-    if not path.endswith('.pth'):
-        path += '.pth'
-    return path
+    def with_suffix(path):
+        return path if path.endswith('.pth') else path + '.pth'
+
+    path = with_suffix(path_or_name)
+    rooted = with_suffix(os.path.join(root, path_or_name))
+    if os.path.isabs(path_or_name) or os.path.exists(path):
+        return path
+    return rooted
 
 
 def prepare_teacher_inputs(inputs, target_size=224):
@@ -48,6 +49,10 @@ def soft_kl_loss(pred_logits, target_logits, temperature=2.0):
     pred_log = F.log_softmax(pred_logits / temperature, dim=1)
     target = F.softmax(target_logits / temperature, dim=1)
     return F.kl_div(pred_log, target, reduction='batchmean') * (temperature ** 2)
+
+
+def kd_loss(student_logits, teacher_logits, temperature=4.0):
+    return soft_kl_loss(student_logits, teacher_logits, temperature)
 
 
 @torch.no_grad()

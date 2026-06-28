@@ -20,6 +20,12 @@ class DefaultConfig(object):
     qkd_student_checkpoint_name = None
     qkd_checkpoint_save_name = 'ALL_CNN_C_c100_rggb_h5_w4a4_qkd'
     qkd_teacher_save_name = 'efficientnetv2_l_qkd_teacher'
+    qkd_use_lutq = False
+    lutq_group_size = 8
+    lutq_int_max = 7
+    use_pact = False
+    pact_alpha = 6.0
+    qkd_cache_teacher_logits = False
 
     test_model_path = './checkpoints/'
     use_trained_model = False

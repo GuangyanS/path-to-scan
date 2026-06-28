@@ -1,0 +1,175 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=0.75in]{geometry}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue
+}
+
+\sisetup{
+  round-mode=places,
+  round-precision=2
+}
+
+\newcommand{\pending}{\textcolor{gray}{pending}}
+
+\title{ScAN - A Path to PIM Hardware-ware Network}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Scope}
+
+This note tracks the current CIFAR-100 path from RGB/FP32 references to
+RAW-RGGB training, 4W4A quantization, and QKD.  Unless stated otherwise,
+reported test accuracy uses the default RAW noise setting
+\texttt{raw\_noise=True}.  Quantized results should be reported from the
+integer simulator, not from fake-quant training metrics.
+
+\section*{Pipeline Summary}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}l l l l X@{}}
+\toprule
+Stage & Input & Model & Inference path & Current status \\
+\midrule
+RGB FP32 & RGB CIFAR-100 & legacy FP32 CNN & floating point & Legacy reference only; rerun not yet in this repo. \\
+RAW/RGGB FP32 & 4-channel RGGB & ALL-CNN-C + BN & floating point & Current reproducible baseline. \\
+RAW/RGGB W4A4 & 4-channel RGGB & ALL-CNN-C QAT & INT simulator & Uniform W4A4 baseline validated. \\
+QKD uniform & 4-channel RGGB & QAT student + EfficientNetV2-L teacher & INT simulator & Matched-schedule partial rerun did not beat current best. \\
+QKD non-uniform & 4-channel RGGB & QAT + integer LUT-Q weight codebook + PACT & codebook INT simulator & Current best validated simulator checkpoint. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section*{Network}
+
+The current student network uses 4-channel RGGB input at spatial size
+$16\times16$.  The first eight convolutions are
+\texttt{Conv2d + BatchNorm2d + ReLU}; the final layer is a logits convolution
+followed by global average pooling.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}l l r r r r@{}}
+\toprule
+Layer & Operation & $C_{\mathrm{in}}\rightarrow C_{\mathrm{out}}$ & Kernel & Stride & Output \\
+\midrule
+1.1 & Conv+BN+ReLU & $4\rightarrow96$ & $3\times3$ & 1 & $96\times16\times16$ \\
+1.2 & Conv+BN+ReLU & $96\rightarrow96$ & $3\times3$ & 1 & $96\times16\times16$ \\
+1.3 & Conv+BN+ReLU & $96\rightarrow96$ & $3\times3$ & 2 & $96\times8\times8$ \\
+2.1 & Conv+BN+ReLU & $96\rightarrow192$ & $3\times3$ & 1 & $192\times8\times8$ \\
+2.2 & Conv+BN+ReLU & $192\rightarrow192$ & $3\times3$ & 1 & $192\times8\times8$ \\
+2.3 & Conv+BN+ReLU & $192\rightarrow192$ & $3\times3$ & 2 & $192\times4\times4$ \\
+3 & Conv+BN+ReLU & $192\rightarrow192$ & $3\times3$ & 1 & $192\times4\times4$ \\
+4 & Conv+BN+ReLU & $192\rightarrow192$ & $1\times1$ & 1 & $192\times4\times4$ \\
+5 & Conv logits + GAP & $192\rightarrow100$ & $1\times1$ & 1 & $100\times4\times4\rightarrow100$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section*{Current Results}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\linewidth}{@{}l l l r X@{}}
+\toprule
+Experiment & Precision & Eval path & Acc. (\%) & Notes \\
+\midrule
+RGB FP32 reference & FP32 & float & \pending & Legacy RGB result should be rerun if needed for a strict comparison. \\
+RAW/RGGB FP32 & FP32 & float & 61.31 & Default noisy test sanity check; training-log best is 61.44. \\
+RAW/RGGB FP32 & FP32 & float & 61.18 & Clean test, \texttt{raw\_noise=False}. \\
+RAW/RGGB QAT & W4A4 uniform & INT simulator & 56.61 & Current validated noisy simulator baseline. \\
+RAW/RGGB QAT & W4A4 uniform & INT simulator & 57.09 & Clean simulator reference from previous run. \\
+QKD uniform, first pass & W4A4 uniform & INT simulator & 56.02 & Worse than QAT; not accepted as final QKD. \\
+QKD uniform, matched schedule & W4A4 uniform & INT simulator & 56.93 & Partial CS rerun best; archived because it did not beat the non-uniform path. \\
+QKD non-uniform SS & W4A4 integer LUT-Q, $m=7$ & codebook INT simulator & 56.78 & Integer LUT values $[-7,\ldots,7]$. \\
+QKD non-uniform SS & W4A4 integer LUT-Q, $m=15$ & codebook INT simulator & 56.52 & Integer LUT values $[-14,-12,\ldots,14]$; training-log best 57.06. \\
+QKD non-uniform SS + PACT & W4A4 integer LUT-Q, $m=15$ & codebook INT simulator & 57.41 & Current best; training-log best 57.52. \\
+QKD non-uniform TU + PACT & W4A4 integer LUT-Q, $m=15$ & codebook INT simulator & 57.19 & Best TU attempt did not improve over SS. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section*{QKD Setup}
+
+The teacher checkpoint \texttt{b4\_100.pth} uses 4-channel RAW/RGGB input, not
+RGB input.  Teacher preprocessing upsamples RGGB tensors to $224\times224$ and
+normalizes with $(x-0.5)/0.5$.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}l r l@{}}
+\toprule
+Teacher / stage & Acc. (\%) & Notes \\
+\midrule
+EfficientNetV2-L teacher, clean & 77.30 & Verified on current H5 test split. \\
+EfficientNetV2-L teacher, noisy & 77.33 & Default noisy evaluation. \\
+Co-studied teacher, noisy & 78.70 & Short CS run improved teacher. \\
+QKD SS first pass & 56.11 & Uniform W4A4 student, noisy test. \\
+QKD TU attempts & 57.19 & Best simulator result so far; did not reproduce the expected 60\% non-uniform tutoring target. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section*{Integer Simulator}
+
+The simulator is the reporting path for quantized inference.  It runs on CPU
+because PyTorch does not provide the exact CUDA int4/int32 convolution kernel
+we need here.
+
+\begin{itemize}
+  \item Inputs are quantized to unsigned 4-bit activation codes in $[0,15]$.
+  \item Uniform weights use signed 4-bit codes in $[-7,7]$ plus per-output-channel scales.
+  \item Non-uniform weights use 4-bit indices into an integer LUT-Q codebook; the current best checkpoint uses integer LUT values $[-14,-12,\ldots,14]$.
+  \item Convolution uses int32 accumulation.
+  \item Requantization uses precomputed layer constants derived from activation and weight scales.
+  \item BatchNorm is folded into convolution weights/bias before simulator execution.
+  \item Weight-side QAT transforms are exported offline into integer weight codes and scales.  Simulator forward does not run \texttt{tanh}, k-means, nearest-LUT search, or weight quantization.
+  \item Final logits are dequantized to FP32 after the final integer convolution and then globally averaged.
+\end{itemize}
+
+For the current uniform QAT checkpoint, fake-quant and simulator agree under
+the same deterministic loader settings:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}l r r@{}}
+\toprule
+Setting & Fake QAT (\%) & INT simulator (\%) \\
+\midrule
+Noisy, \texttt{raw\_noise=True}, \texttt{num\_workers=0} & 56.61 & 56.61 \\
+Clean, \texttt{raw\_noise=False}, \texttt{num\_workers=0} & 57.09 & 57.09 \\
+Non-uniform SS, integer LUT-Q $m=7$, noisy & 56.78 & 56.78 \\
+Non-uniform SS, integer LUT-Q $m=15$, noisy & 56.52 & 56.52 \\
+Non-uniform SS + PACT, integer LUT-Q $m=15$, noisy & 57.41 & 57.41 \\
+Non-uniform TU + PACT, integer LUT-Q $m=15$, noisy & -- & 57.19 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section*{Next Updates}
+
+\begin{enumerate}
+  \item Investigate why minimal TU does not reproduce the expected 60\% non-uniform tutoring result.
+  \item Keep simulator reporting on the precomputed integer path with \texttt{raw\_noise=True}.
+  \item Add hardware constraints once the PIM-side requirements are finalized.
+\end{enumerate}
+
+\end{document}

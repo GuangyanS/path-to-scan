@@ -49,10 +49,10 @@ def check_acc(loader, model, device, name='test'):
     return acc
 
 
-def build_h5_loaders():
+def build_h5_loaders(return_index=False):
     train_set = RawH5CIFARDataset(
         opt.h5_path, train=True, augment=opt.raw_augment,
-        noise=opt.raw_noise)
+        noise=opt.raw_noise, return_index=return_index)
     test_set = RawH5CIFARDataset(
         opt.h5_path, train=False, augment=False,
         noise=opt.raw_noise)
@@ -184,12 +184,12 @@ def fit(model, loader_train, loader_test, device, max_epoch, lr, milestones,
 def qkd_stage_defaults(stage):
     stage = stage.upper()
     defaults = {
-        'SS': {'epochs': 30, 'lr': opt.qat_lr, 'milestones': '10,20',
+        'SS': {'epochs': 30, 'lr': 0.01, 'milestones': '10,20',
+               'temperature': 4.0},
+        'CS': {'epochs': 100, 'lr': 0.01, 'milestones': '80,120',
                'temperature': 2.0},
-        'CS': {'epochs': 100, 'lr': opt.qat_lr, 'milestones': '80,120',
-               'temperature': 2.0},
-        'TU': {'epochs': 70, 'lr': opt.qat_lr * 0.5, 'milestones': '40,60',
-               'temperature': 2.0},
+        'TU': {'epochs': 70, 'lr': 0.005, 'milestones': '40,60',
+               'temperature': 4.0},
     }
     if stage not in defaults:
         raise ValueError('qkd_stage must be SS, CS, or TU')
@@ -199,15 +199,54 @@ def qkd_stage_defaults(stage):
 def qkd_default_student_checkpoint(stage):
     if opt.qkd_student_checkpoint_name:
         return opt.qkd_student_checkpoint_name
+    name = opt.qkd_checkpoint_save_name
+    if opt.qkd_use_lutq:
+        name += '_lutq'
     if stage == 'CS':
-        return opt.qkd_checkpoint_save_name + '_ss'
+        return name + '_ss'
     if stage == 'TU':
-        return opt.qkd_checkpoint_save_name + '_cs'
+        return name + '_cs'
     return opt.qat_checkpoint_save_name
 
 
 def qkd_stage_save_name(stage):
-    return opt.qkd_checkpoint_save_name + '_' + stage.lower()
+    name = opt.qkd_checkpoint_save_name
+    if opt.qkd_use_lutq:
+        name += '_lutq'
+    return name + '_' + stage.lower()
+
+
+def make_qat_model():
+    return models.ALL_CNN_C_QAT(
+        num_classes=opt.num_classes, in_channels=opt.input_channels,
+        use_lutq=opt.qkd_use_lutq, lutq_group_size=opt.lutq_group_size,
+        lutq_int_max=opt.lutq_int_max, use_pact=opt.use_pact,
+        pact_alpha=opt.pact_alpha)
+
+
+def update_lutq_codebook(model):
+    if getattr(model, 'use_lutq', False):
+        weights = models.collect_lutq_normalized_weights(model)
+        model.lutq_codebook.update_kmeans(weights)
+
+
+@torch.no_grad()
+def precompute_teacher_logits(teacher, device):
+    cache_set = RawH5CIFARDataset(
+        opt.h5_path, train=True, augment=False, noise=opt.raw_noise)
+    cache_loader = DataLoader(
+        cache_set, batch_size=opt.batch_size, shuffle=False,
+        num_workers=0, pin_memory=opt.use_gpu)
+    teacher.eval()
+    chunks = []
+    print('precomputing frozen teacher logits for TU cache')
+    for data, _ in tqdm(cache_loader):
+        data = data.to(device=device, dtype=torch.float32)
+        scores = teacher(qkd.prepare_teacher_inputs(data))
+        chunks.append(scores.detach().cpu())
+    logits = torch.cat(chunks, dim=0)
+    print('cached teacher logits:', tuple(logits.shape))
+    return logits
 
 
 def fit_qkd(stage, student, teacher, loader_train, loader_test, device,
@@ -228,7 +267,7 @@ def fit_qkd(stage, student, teacher, loader_train, loader_test, device,
     optimizer = optim.SGD(
         params, lr=lr, momentum=0.9, weight_decay=opt.weight_decay,
         nesterov=True)
-    scheduler = make_scheduler(optimizer, milestones, 0)
+    scheduler = make_scheduler(optimizer, milestones, 2)
 
     existing_best = checkpoint_best_acc(checkpoint_save_name)
     best_testacc = initial_testacc if initial_testacc is not None else 0.0
@@ -243,16 +282,28 @@ def fit_qkd(stage, student, teacher, loader_train, loader_test, device,
         else:
             print('**  Keep existing QKD %s best %.2f%% over baseline %.2f%%'
                   % (stage, existing_best * 100, initial_testacc * 100))
+
+    teacher_logits_cache = None
+    if stage == 'TU' and teacher is not None and opt.qkd_cache_teacher_logits:
+        teacher_logits_cache = precompute_teacher_logits(teacher, device)
+
     for epoch in range(max_epoch):
         student.train()
         if teacher is not None:
             teacher.train(stage == 'CS')
 
         loss_now = 0.0
-        for ii, (data, label) in tqdm(enumerate(loader_train)):
+        for ii, batch in tqdm(enumerate(loader_train)):
+            if len(batch) == 3:
+                data, label, index = batch
+            else:
+                data, label = batch
+                index = None
             data = data.to(device=device, dtype=torch.float32)
             label = label.to(device=device, dtype=torch.long)
 
+            if stage == 'SS':
+                update_lutq_codebook(student)
             optimizer.zero_grad()
             student_scores = student(data)
             student_ce = F.cross_entropy(student_scores, label)
@@ -263,20 +314,20 @@ def fit_qkd(stage, student, teacher, loader_train, loader_test, device,
                 if stage == 'CS':
                     teacher_scores = teacher(t_data)
                     student_kd = qkd.soft_kl_loss(
-                        student_scores, teacher_scores.detach(),
-                        temperature)
-                    teacher_ce = F.cross_entropy(teacher_scores, label)
-                    teacher_kd = qkd.soft_kl_loss(
-                        teacher_scores, student_scores.detach(),
-                        temperature)
-                    loss = (student_ce + opt.qkd_kd_weight * student_kd
-                            + teacher_ce + opt.qkd_kd_weight * teacher_kd)
+                        student_scores, teacher_scores, temperature)
+                    alpha = opt.qkd_kd_weight
+                    loss = (1.0 - alpha) * student_ce + alpha * student_kd
                 else:
-                    with torch.no_grad():
-                        teacher_scores = teacher(t_data)
+                    if teacher_logits_cache is not None and index is not None:
+                        teacher_scores = teacher_logits_cache[index].to(
+                            device=device, dtype=torch.float32)
+                    else:
+                        with torch.no_grad():
+                            teacher_scores = teacher(t_data)
                     student_kd = qkd.soft_kl_loss(
                         student_scores, teacher_scores, temperature)
-                    loss = student_ce + opt.qkd_kd_weight * student_kd
+                    alpha = opt.qkd_kd_weight
+                    loss = (1.0 - alpha) * student_ce + alpha * student_kd
 
             loss.backward()
             if opt.qkd_grad_clip and opt.qkd_grad_clip > 0:
@@ -356,6 +407,7 @@ def load_fp32_init_for_qat(model):
         checkpoint_path(opt.fp32_checkpoint_name), map_location='cpu')
     missing, unexpected = model.load_state_dict(
         checkpoint['state_dict'], strict=False)
+    missing = [k for k in missing if not k.startswith('lutq_codebook.')]
     if unexpected:
         raise RuntimeError('unexpected FP32 checkpoint keys: %s' % unexpected)
     print('loaded FP32 init from %s' % checkpoint_path(opt.fp32_checkpoint_name))
@@ -375,8 +427,7 @@ def qat_finetune(**kwargs):
     loader_train, loader_test = build_h5_loaders()
     device = get_device()
 
-    model = models.ALL_CNN_C_QAT(
-        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    model = make_qat_model()
     load_fp32_init_for_qat(model)
     model.to(device)
 
@@ -394,8 +445,7 @@ def qat_test(**kwargs):
     _, loader_test = build_h5_loaders()
     device = get_device()
 
-    model = models.ALL_CNN_C_QAT(
-        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    model = make_qat_model()
     cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
     model.load(opt.test_model_path + cp_name)
     model.to(device)
@@ -411,8 +461,7 @@ def real_quant_test(**kwargs):
     _, loader_test = build_h5_loaders()
     device = get_device()
 
-    qat_model = models.ALL_CNN_C_QAT(
-        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    qat_model = make_qat_model()
     cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
     qat_model.load(opt.test_model_path + cp_name)
     qat_model.eval()
@@ -429,8 +478,7 @@ def int4_sim_test(**kwargs):
 
     _, loader_test = build_h5_loaders()
 
-    qat_model = models.ALL_CNN_C_QAT(
-        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    qat_model = make_qat_model()
     cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
     qat_model.load(opt.test_model_path + cp_name)
     qat_model.eval()
@@ -467,11 +515,11 @@ def qkd_finetune(**kwargs):
     if stage not in ('SS', 'CS', 'TU'):
         raise ValueError('qkd_stage must be SS, CS, or TU')
 
-    loader_train, loader_test = build_h5_loaders()
+    loader_train, loader_test = build_h5_loaders(
+        return_index=(stage == 'TU' and opt.qkd_cache_teacher_logits))
     device = get_device()
 
-    student = models.ALL_CNN_C_QAT(
-        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    student = make_qat_model()
     if stage == 'SS':
         load_fp32_init_for_qat(student)
     else:

@@ -189,6 +189,88 @@ def fake_quant_weight_4bit(weight):
     return weight + (quantized - weight).detach()
 
 
+class LUTQCodebook(nn.Module):
+    """Shared integer LUT for non-uniform 4-bit weight quantization."""
+
+    def __init__(self, bits=4, int_max=None):
+        super().__init__()
+        levels = 2 ** (bits - 1) - 1
+        max_val = levels if int_max is None else int(int_max)
+        if max_val < levels:
+            raise ValueError('int_max must be at least %d' % levels)
+        self.register_buffer('max_val', torch.tensor(float(max_val)))
+        init = torch.linspace(-max_val, max_val, steps=2 * levels + 1)
+        self.register_buffer(
+            'int_codebook', torch.round(init).to(torch.int32))
+
+    @property
+    def codebook_normalized(self):
+        return self.int_codebook.to(torch.float32) / torch.clamp(
+            self.max_val, min=1e-8)
+
+    @torch.no_grad()
+    def update_kmeans(self, weights_norm):
+        codebook_norm = self.codebook_normalized
+        dists = (weights_norm.unsqueeze(-1) - codebook_norm.unsqueeze(0)).abs()
+        idx = dists.argmin(dim=-1)
+        new_centroids = torch.zeros(
+            self.int_codebook.numel(), device=weights_norm.device,
+            dtype=weights_norm.dtype)
+        counts = torch.zeros_like(new_centroids)
+        new_centroids.scatter_add_(0, idx, weights_norm)
+        counts.scatter_add_(0, idx, torch.ones_like(weights_norm))
+        active = counts > 0
+        new_centroids[active] /= counts[active]
+        new_int = torch.round(new_centroids * self.max_val).clamp(
+            -self.max_val.item(), self.max_val.item()).to(torch.int32)
+        self.int_codebook[active] = new_int[active]
+        self.int_codebook.copy_(self.int_codebook.sort().values)
+
+
+def _weight_group_size(weight, group_size):
+    if group_size is None or group_size <= 0:
+        return weight.shape[0]
+    return max(1, int(group_size))
+
+
+def _collect_weight_norm(weight, group_size):
+    group_size = _weight_group_size(weight, group_size)
+    weight = torch.tanh(weight.detach())
+    chunks = []
+    for start in range(0, weight.shape[0], group_size):
+        group = weight[start:start + group_size]
+        scale = torch.clamp(group.abs().amax(), min=1e-8)
+        chunks.append(torch.clamp(group / scale, -1.0, 1.0).reshape(-1))
+    return torch.cat(chunks)
+
+
+def collect_lutq_normalized_weights(model):
+    chunks = []
+    if not getattr(model, 'use_lutq', False):
+        return torch.zeros(1)
+    for conv in model.quant_convs():
+        chunks.append(_collect_weight_norm(conv.weight, model.lutq_group_size))
+    return torch.cat(chunks) if chunks else torch.zeros(1)
+
+
+def lutq_fake_quant_weight_4bit(weight, codebook, group_size):
+    group_size = _weight_group_size(weight, group_size)
+    weight_tanh = torch.tanh(weight)
+    chunks = []
+    for start in range(0, weight_tanh.shape[0], group_size):
+        group = weight_tanh[start:start + group_size]
+        scale = torch.clamp(group.detach().abs().amax(), min=1e-8)
+        normalized = torch.clamp(group / scale, -1.0, 1.0)
+        values = codebook.codebook_normalized.to(
+            device=weight.device, dtype=weight.dtype)
+        dists = (normalized.reshape(-1).unsqueeze(-1) - values.unsqueeze(0)).abs()
+        idx = dists.argmin(dim=-1)
+        quantized = values[idx].reshape_as(group) * scale
+        chunks.append(quantized)
+    quantized = torch.cat(chunks, dim=0)
+    return weight + (quantized - weight).detach()
+
+
 class ActivationFakeQuant4Bit(nn.Module):
     def __init__(self, momentum=0.1):
         super().__init__()
@@ -219,6 +301,42 @@ class ActivationFakeQuant4Bit(nn.Module):
         return x + (quantized - x).detach()
 
 
+class _PACTClamp(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.save_for_backward(x, alpha)
+        return torch.clamp(x, min=0.0, max=float(alpha.item()))
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, alpha = ctx.saved_tensors
+        grad_x = grad_output.clone()
+        grad_x[x < 0] = 0
+        grad_x[x > alpha] = 0
+        grad_alpha = grad_output[x >= alpha].sum().reshape_as(alpha)
+        return grad_x, grad_alpha
+
+
+class PACTActivationFakeQuant4Bit(nn.Module):
+    def __init__(self, init_alpha=6.0):
+        super().__init__()
+        target = torch.tensor(max(float(init_alpha) - 1e-3, 1e-6))
+        raw_alpha = torch.log(torch.expm1(target))
+        self.alpha = nn.Parameter(raw_alpha)
+
+    @property
+    def amax(self):
+        return F.softplus(self.alpha) + 1e-3
+
+    def forward(self, x):
+        qmax = 15.0
+        alpha = self.amax
+        x_clip = _PACTClamp.apply(x, alpha)
+        scale = alpha / qmax
+        quantized = torch.clamp(torch.round(x_clip / scale), 0.0, qmax) * scale
+        return x_clip + (quantized - x_clip).detach()
+
+
 class QuantConv2d4Bit(nn.Conv2d):
     def forward(self, x):
         return F.conv2d(
@@ -229,12 +347,24 @@ class QuantConv2d4Bit(nn.Conv2d):
 class ALL_CNN_C_QAT(BasicModule):
     """4W4A fake-quantized ALL-CNN-C for QAT fine-tuning."""
 
-    def __init__(self, num_classes=100, in_channels=4):
+    def __init__(self, num_classes=100, in_channels=4,
+                 use_lutq=False, lutq_group_size=8, lutq_int_max=7,
+                 use_pact=False, pact_alpha=6.0):
         super(ALL_CNN_C_QAT, self).__init__()
 
         self.model_name = 'ALL_CNN_C_QAT'
+        self.use_lutq = bool(use_lutq)
+        self.lutq_group_size = int(lutq_group_size)
+        self.lutq_int_max = int(lutq_int_max)
+        self.use_pact = bool(use_pact)
+        self.pact_alpha = float(pact_alpha)
+        if self.use_lutq:
+            self.lutq_codebook = LUTQCodebook(bits=4, int_max=self.lutq_int_max)
 
-        self.act0 = ActivationFakeQuant4Bit()
+        act = (lambda alpha: PACTActivationFakeQuant4Bit(alpha)
+               if self.use_pact else ActivationFakeQuant4Bit())
+
+        self.act0 = act(1.0)
         self.conv1 = QuantConv2d4Bit(in_channels, 96, 3, padding=1, bias=False)
         self.conv2 = QuantConv2d4Bit(96, 96, 3, padding=1, bias=False)
         self.conv3 = QuantConv2d4Bit(96, 96, 3, stride=2, padding=1, bias=False)
@@ -258,33 +388,50 @@ class ALL_CNN_C_QAT(BasicModule):
         self.bn7 = nn.BatchNorm2d(192)
         self.bn8 = nn.BatchNorm2d(192)
 
-        self.act1 = ActivationFakeQuant4Bit()
-        self.act2 = ActivationFakeQuant4Bit()
-        self.act3 = ActivationFakeQuant4Bit()
-        self.act4 = ActivationFakeQuant4Bit()
-        self.act5 = ActivationFakeQuant4Bit()
-        self.act6 = ActivationFakeQuant4Bit()
-        self.act7 = ActivationFakeQuant4Bit()
-        self.act8 = ActivationFakeQuant4Bit()
+        self.act1 = act(self.pact_alpha)
+        self.act2 = act(self.pact_alpha)
+        self.act3 = act(self.pact_alpha)
+        self.act4 = act(self.pact_alpha)
+        self.act5 = act(self.pact_alpha)
+        self.act6 = act(self.pact_alpha)
+        self.act7 = act(self.pact_alpha)
+        self.act8 = act(self.pact_alpha)
 
         self.avg = nn.AdaptiveAvgPool2d((1, 1))
+
+    def quant_convs(self):
+        return (
+            self.conv1, self.conv2, self.conv3, self.conv4, self.conv5,
+            self.conv6, self.conv7, self.conv8, self.conv9,
+        )
+
+    def _conv_weight(self, conv):
+        if self.use_lutq:
+            return lutq_fake_quant_weight_4bit(
+                conv.weight, self.lutq_codebook, self.lutq_group_size)
+        return fake_quant_weight_4bit(conv.weight)
+
+    def _conv(self, conv, x):
+        return F.conv2d(
+            x, self._conv_weight(conv), conv.bias, conv.stride, conv.padding,
+            conv.dilation, conv.groups)
 
     def forward(self, x):
         x = self.act0(x)
 
-        x = self.act1(F.relu(self.bn1(self.conv1(x))))
-        x = self.act2(F.relu(self.bn2(self.conv2(x))))
-        x = self.act3(F.relu(self.bn3(self.conv3(x))))
+        x = self.act1(F.relu(self.bn1(self._conv(self.conv1, x))))
+        x = self.act2(F.relu(self.bn2(self._conv(self.conv2, x))))
+        x = self.act3(F.relu(self.bn3(self._conv(self.conv3, x))))
         x = self.dp1(x)
 
-        x = self.act4(F.relu(self.bn4(self.conv4(x))))
-        x = self.act5(F.relu(self.bn5(self.conv5(x))))
-        x = self.act6(F.relu(self.bn6(self.conv6(x))))
+        x = self.act4(F.relu(self.bn4(self._conv(self.conv4, x))))
+        x = self.act5(F.relu(self.bn5(self._conv(self.conv5, x))))
+        x = self.act6(F.relu(self.bn6(self._conv(self.conv6, x))))
         x = self.dp2(x)
 
-        x = self.act7(F.relu(self.bn7(self.conv7(x))))
-        x = self.act8(F.relu(self.bn8(self.conv8(x))))
-        x = self.conv9(x)
+        x = self.act7(F.relu(self.bn7(self._conv(self.conv7, x))))
+        x = self.act8(F.relu(self.bn8(self._conv(self.conv8, x))))
+        x = self._conv(self.conv9, x)
 
         x = self.avg(x)
         return torch.flatten(x, 1)
