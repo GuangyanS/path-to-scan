@@ -227,8 +227,9 @@ class LUTQConvLogits(nn.Module):
 class ALLCNNInt4Simulator(nn.Module):
     """W4A4 integer-domain simulator for the current ALL_CNN_C_QAT model.
 
-    Weights are signed int4 codes in [-7, 7]. Activations are unsigned int4
-    codes in [0, 15]. Conv layers use int32 accumulation, then a precomputed
+    The first layer may use higher precision input codes, e.g. I16. Weights
+    are integer 4-bit/LUT codes. Hidden activations are unsigned int4 codes in
+    [0, 15]. Conv layers use int32 accumulation, then a precomputed
     requantization scale maps the accumulator to the next activation code.
     """
 
@@ -236,7 +237,11 @@ class ALLCNNInt4Simulator(nn.Module):
         super().__init__()
         qat_model.eval()
 
-        s0 = _activation_scale(qat_model.act0)
+        self.input_bits = int(getattr(qat_model, 'input_bits', 16))
+        self.input_qmax = float(2 ** self.input_bits - 1)
+        s0 = torch.tensor(1.0 / self.input_qmax)
+        if self.input_bits <= 4:
+            s0 = _activation_scale(qat_model.act0)
         s1 = _activation_scale(qat_model.act1)
         s2 = _activation_scale(qat_model.act2)
         s3 = _activation_scale(qat_model.act3)
@@ -272,7 +277,7 @@ class ALLCNNInt4Simulator(nn.Module):
     def quantize_input(self, x):
         x = x.to(torch.float32).cpu()
         q = torch.round(x / self.input_scale.to(dtype=x.dtype))
-        return torch.clamp(q, 0.0, 15.0).to(torch.int32)
+        return torch.clamp(q, 0.0, self.input_qmax).to(torch.int32)
 
     def forward(self, x):
         x = self.quantize_input(x)
@@ -296,6 +301,7 @@ class ALLCNNInt4Simulator(nn.Module):
                     wmins.append(int(module.qweight.min().item()))
                     wmaxs.append(int(module.qweight.max().item()))
             return {
+                'input': (0, int(self.input_qmax)),
                 'weight_index': (0, int(self.lutq_int_codebook.numel() - 1)),
                 'weight_lut_int': [int(x) for x in self.lutq_int_codebook.tolist()],
                 'weight': (min(wmins), max(wmaxs)),
@@ -306,6 +312,7 @@ class ALLCNNInt4Simulator(nn.Module):
                 wmins.append(int(module.qweight.min().item()))
                 wmaxs.append(int(module.qweight.max().item()))
         return {
+            'input': (0, int(self.input_qmax)),
             'weight': (min(wmins), max(wmaxs)),
             'activation': (0, 15),
         }

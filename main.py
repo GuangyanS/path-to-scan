@@ -119,6 +119,86 @@ def load_classifier_checkpoint(model, cp_name):
     return incompatible
 
 
+QAT_STAGE_MAP = (
+    ('stage1.0', 'conv1', 'bn1', 'act1'),
+    ('stage1.1', 'conv2', 'bn2', 'act2'),
+    ('stage1.2', 'conv3', 'bn3', 'act3'),
+    ('stage2.0', 'conv4', 'bn4', 'act4'),
+    ('stage2.1', 'conv5', 'bn5', 'act5'),
+    ('stage2.2', 'conv6', 'bn6', 'act6'),
+    ('stage3.0', 'conv7', 'bn7', 'act7'),
+    ('stage3.1', 'conv8', 'bn8', 'act8'),
+    ('stage3.2', 'conv9', None, None),
+)
+
+
+def _legacy_qat_state_dict(legacy_sd, model):
+    state = model.state_dict()
+    converted = dict(state)
+    for stage, conv, bn, act in QAT_STAGE_MAP:
+        converted[conv + '.weight'] = legacy_sd[stage + '.conv.weight']
+        bias_key = stage + '.conv.bias'
+        if bias_key in legacy_sd and conv + '.bias' in state:
+            converted[conv + '.bias'] = legacy_sd[bias_key]
+
+        if bn is not None:
+            for suffix in ('weight', 'bias', 'running_mean', 'running_var',
+                           'num_batches_tracked'):
+                old_key = stage + '.norm.' + suffix
+                new_key = bn + '.' + suffix
+                if old_key in legacy_sd and new_key in state:
+                    converted[new_key] = legacy_sd[old_key]
+
+        pact_key = stage + '.pact.alpha'
+        act_key = None if act is None else act + '.alpha'
+        if pact_key in legacy_sd and act_key in state:
+            converted[act_key] = legacy_sd[pact_key]
+
+    if getattr(model, 'use_lutq', False):
+        codebook_key = 'stage1.0.codebook.int_codebook'
+        max_key = 'stage1.0.codebook.max_val'
+        if codebook_key in legacy_sd and 'lutq_codebook.int_codebook' in state:
+            converted['lutq_codebook.int_codebook'] = legacy_sd[codebook_key].to(
+                state['lutq_codebook.int_codebook'].dtype)
+        if max_key in legacy_sd and 'lutq_codebook.max_val' in state:
+            converted['lutq_codebook.max_val'] = legacy_sd[max_key].to(
+                state['lutq_codebook.max_val'].dtype)
+    return converted
+
+
+def load_qat_checkpoint(model, cp_name, strict=True):
+    path = resolve_checkpoint_path(cp_name)
+    checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+    if hasattr(model, 'input_bits') and 'input_bits' in checkpoint:
+        model.input_bits = int(checkpoint['input_bits'])
+    if 'state_dict' in checkpoint:
+        state_dict = checkpoint['state_dict']
+    elif 'qat_state_dict' in checkpoint:
+        state_dict = checkpoint['qat_state_dict']
+        if any(k.startswith('stage1.') for k in state_dict):
+            state_dict = _legacy_qat_state_dict(state_dict, model)
+    else:
+        state_dict = checkpoint
+
+    incompatible = model.load_state_dict(state_dict, strict=strict)
+    model.epoch = checkpoint.get('epoch', 0)
+    model.lr_pre_epoch = checkpoint.get('lr', [])
+    model.loss_pre_epoch = checkpoint.get('loss', [])
+    if 'testacc' in checkpoint:
+        model.testacc_pre_epoch = checkpoint['testacc']
+    elif 'acc' in checkpoint:
+        acc = float(checkpoint['acc'])
+        model.testacc_pre_epoch = [acc / 100.0 if acc > 1.0 else acc]
+    else:
+        model.testacc_pre_epoch = []
+    print('loaded QAT checkpoint from %s' % path)
+    if not strict:
+        print('loaded with missing keys: %d, unexpected keys: %d'
+              % (len(incompatible.missing_keys),
+                 len(incompatible.unexpected_keys)))
+    return incompatible
+
+
 def resolve_checkpoint_path(path_or_name):
     return qkd.resolve_path(path_or_name, opt.test_model_path)
 
@@ -221,7 +301,7 @@ def make_qat_model():
         num_classes=opt.num_classes, in_channels=opt.input_channels,
         use_lutq=opt.qkd_use_lutq, lutq_group_size=opt.lutq_group_size,
         lutq_int_max=opt.lutq_int_max, use_pact=opt.use_pact,
-        pact_alpha=opt.pact_alpha)
+        pact_alpha=opt.pact_alpha, input_bits=opt.input_bits)
 
 
 def update_lutq_codebook(model):
@@ -313,8 +393,13 @@ def fit_qkd(stage, student, teacher, loader_train, loader_test, device,
                 t_data = qkd.prepare_teacher_inputs(data)
                 if stage == 'CS':
                     teacher_scores = teacher(t_data)
-                    student_kd = qkd.soft_kl_loss(
-                        student_scores, teacher_scores, temperature)
+                    if opt.qkd_loss == 'dkd':
+                        student_kd = qkd.dkd_loss(
+                            student_scores, teacher_scores, label,
+                            temperature, opt.dkd_alpha, opt.dkd_beta)
+                    else:
+                        student_kd = qkd.soft_kl_loss(
+                            student_scores, teacher_scores, temperature)
                     alpha = opt.qkd_kd_weight
                     loss = (1.0 - alpha) * student_ce + alpha * student_kd
                 else:
@@ -324,8 +409,13 @@ def fit_qkd(stage, student, teacher, loader_train, loader_test, device,
                     else:
                         with torch.no_grad():
                             teacher_scores = teacher(t_data)
-                    student_kd = qkd.soft_kl_loss(
-                        student_scores, teacher_scores, temperature)
+                    if opt.qkd_loss == 'dkd':
+                        student_kd = qkd.dkd_loss(
+                            student_scores, teacher_scores, label,
+                            temperature, opt.dkd_alpha, opt.dkd_beta)
+                    else:
+                        student_kd = qkd.soft_kl_loss(
+                            student_scores, teacher_scores, temperature)
                     alpha = opt.qkd_kd_weight
                     loss = (1.0 - alpha) * student_ce + alpha * student_kd
 
@@ -447,7 +537,7 @@ def qat_test(**kwargs):
 
     model = make_qat_model()
     cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
-    model.load(opt.test_model_path + cp_name)
+    load_qat_checkpoint(model, cp_name)
     model.to(device)
     check_acc(loader_test, model, device, name='4W4A test')
 
@@ -463,7 +553,7 @@ def real_quant_test(**kwargs):
 
     qat_model = make_qat_model()
     cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
-    qat_model.load(opt.test_model_path + cp_name)
+    load_qat_checkpoint(qat_model, cp_name)
     qat_model.eval()
 
     model = models.ALL_CNN_C_INT4(qat_model).to(device)
@@ -480,7 +570,7 @@ def int4_sim_test(**kwargs):
 
     qat_model = make_qat_model()
     cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
-    qat_model.load(opt.test_model_path + cp_name)
+    load_qat_checkpoint(qat_model, cp_name)
     qat_model.eval()
 
     model = ALLCNNInt4Simulator(qat_model).cpu()
@@ -524,7 +614,7 @@ def qkd_finetune(**kwargs):
         load_fp32_init_for_qat(student)
     else:
         student_checkpoint = qkd_default_student_checkpoint(stage)
-        student.load(resolve_checkpoint_path(student_checkpoint))
+        load_qat_checkpoint(student, student_checkpoint)
         print('loaded QKD student from %s'
               % resolve_checkpoint_path(student_checkpoint))
     student.to(device)

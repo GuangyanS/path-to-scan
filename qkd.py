@@ -5,6 +5,8 @@ import torch.nn.functional as F
 
 from models.efficientnetv2 import efficientnet_v2_l
 
+EPS = 1e-8
+
 
 def resolve_path(path_or_name, root='./checkpoints/'):
     def with_suffix(path):
@@ -53,6 +55,40 @@ def soft_kl_loss(pred_logits, target_logits, temperature=2.0):
 
 def kd_loss(student_logits, teacher_logits, temperature=4.0):
     return soft_kl_loss(student_logits, teacher_logits, temperature)
+
+
+def _gt_mask(logits, labels):
+    mask = torch.zeros_like(logits, dtype=torch.bool)
+    mask.scatter_(1, labels.unsqueeze(1), True)
+    return mask
+
+
+def _cat_mask(probs, mask):
+    p_target = (probs * mask).sum(dim=1, keepdim=True)
+    p_other = (probs * ~mask).sum(dim=1, keepdim=True)
+    return torch.cat([p_target, p_other], dim=1)
+
+
+def dkd_loss(student_logits, teacher_logits, labels, temperature=4.0,
+             alpha=1.0, beta=2.0):
+    gt = _gt_mask(student_logits, labels)
+
+    student_probs = F.softmax(student_logits / temperature, dim=1)
+    teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+    student_binary = _cat_mask(student_probs, gt).clamp(min=EPS)
+    teacher_binary = _cat_mask(teacher_probs, gt).clamp(min=EPS)
+    tckd = F.kl_div(
+        torch.log(student_binary), teacher_binary,
+        reduction='batchmean') * (temperature ** 2)
+
+    masked_student = student_logits / temperature - 1000.0 * gt.float()
+    masked_teacher = teacher_logits / temperature - 1000.0 * gt.float()
+    student_log_other = F.log_softmax(masked_student, dim=1)
+    teacher_other = F.softmax(masked_teacher, dim=1)
+    nckd = F.kl_div(
+        student_log_other, teacher_other,
+        reduction='batchmean') * (temperature ** 2)
+    return alpha * tckd + beta * nckd
 
 
 @torch.no_grad()

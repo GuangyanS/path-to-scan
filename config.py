@@ -23,6 +23,7 @@ class DefaultConfig(object):
     qkd_use_lutq = False
     lutq_group_size = 8
     lutq_int_max = 7
+    input_bits = 16
     use_pact = False
     pact_alpha = 6.0
     qkd_cache_teacher_logits = False
@@ -59,6 +60,9 @@ class DefaultConfig(object):
     qkd_milestones = None
     qkd_temperature = None
     qkd_kd_weight = 0.3
+    qkd_loss = 'kl'
+    dkd_alpha = 1.0
+    dkd_beta = 2.0
     qkd_teacher_lr_factor = 0.01
     qkd_grad_clip = 1.0
 

@@ -349,13 +349,14 @@ class ALL_CNN_C_QAT(BasicModule):
 
     def __init__(self, num_classes=100, in_channels=4,
                  use_lutq=False, lutq_group_size=8, lutq_int_max=7,
-                 use_pact=False, pact_alpha=6.0):
+                 use_pact=False, pact_alpha=6.0, input_bits=16):
         super(ALL_CNN_C_QAT, self).__init__()
 
         self.model_name = 'ALL_CNN_C_QAT'
         self.use_lutq = bool(use_lutq)
         self.lutq_group_size = int(lutq_group_size)
         self.lutq_int_max = int(lutq_int_max)
+        self.input_bits = int(input_bits)
         self.use_pact = bool(use_pact)
         self.pact_alpha = float(pact_alpha)
         if self.use_lutq:
@@ -416,8 +417,15 @@ class ALL_CNN_C_QAT(BasicModule):
             x, self._conv_weight(conv), conv.bias, conv.stride, conv.padding,
             conv.dilation, conv.groups)
 
+    def _input_quant(self, x):
+        if self.input_bits > 4:
+            qmax = float(2 ** self.input_bits - 1)
+            quantized = torch.clamp(torch.round(x * qmax), 0.0, qmax) / qmax
+            return x + (quantized - x).detach()
+        return self.act0(x)
+
     def forward(self, x):
-        x = self.act0(x)
+        x = self._input_quant(x)
 
         x = self.act1(F.relu(self.bn1(self._conv(self.conv1, x))))
         x = self.act2(F.relu(self.bn2(self._conv(self.conv2, x))))

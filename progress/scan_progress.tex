@@ -99,8 +99,8 @@ QKD uniform, first pass & W4A4 uniform & INT simulator & 56.02 & Worse than QAT;
 QKD uniform, matched schedule & W4A4 uniform & INT simulator & 56.93 & Partial CS rerun best; archived because it did not beat the non-uniform path. \\
 QKD non-uniform SS & W4A4 integer LUT-Q, $m=7$ & codebook INT simulator & 56.78 & Integer LUT values $[-7,\ldots,7]$. \\
 QKD non-uniform SS & W4A4 integer LUT-Q, $m=15$ & codebook INT simulator & 56.52 & Integer LUT values $[-14,-12,\ldots,14]$; training-log best 57.06. \\
-QKD non-uniform SS + PACT & W4A4 integer LUT-Q, $m=15$ & codebook INT simulator & 57.41 & Current best; training-log best 57.52. \\
-QKD non-uniform TU + PACT & W4A4 integer LUT-Q, $m=15$ & codebook INT simulator & 57.19 & Best TU attempt did not improve over SS. \\
+QKD non-uniform SS + PACT & I16/W4/A4 integer LUT-Q, $m=15$ & codebook INT simulator & 60.21 & Current best; training-log best 60.66. \\
+QKD non-uniform TU + DKD & I16/W4/A4 integer LUT-Q, $m=15$ & codebook INT simulator & 60.20 & Initial checkpoint remained best; TU did not improve over SS. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -122,7 +122,7 @@ EfficientNetV2-L teacher, clean & 77.30 & Verified on current H5 test split. \\
 EfficientNetV2-L teacher, noisy & 77.33 & Default noisy evaluation. \\
 Co-studied teacher, noisy & 78.70 & Short CS run improved teacher. \\
 QKD SS first pass & 56.11 & Uniform W4A4 student, noisy test. \\
-QKD TU attempts & 57.19 & Best simulator result so far; did not reproduce the expected 60\% non-uniform tutoring target. \\
+QKD TU attempts & 60.20 & Best TU simulator result so far; did not improve over the I16 SS checkpoint. \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -134,7 +134,8 @@ because PyTorch does not provide the exact CUDA int4/int32 convolution kernel
 we need here.
 
 \begin{itemize}
-  \item Inputs are quantized to unsigned 4-bit activation codes in $[0,15]$.
+  \item The first layer input uses unsigned 16-bit input codes in $[0,65535]$.
+  \item Hidden activations use unsigned 4-bit activation codes in $[0,15]$.
   \item Uniform weights use signed 4-bit codes in $[-7,7]$ plus per-output-channel scales.
   \item Non-uniform weights use 4-bit indices into an integer LUT-Q codebook; the current best checkpoint uses integer LUT values $[-14,-12,\ldots,14]$.
   \item Convolution uses int32 accumulation.
@@ -158,8 +159,8 @@ Noisy, \texttt{raw\_noise=True}, \texttt{num\_workers=0} & 56.61 & 56.61 \\
 Clean, \texttt{raw\_noise=False}, \texttt{num\_workers=0} & 57.09 & 57.09 \\
 Non-uniform SS, integer LUT-Q $m=7$, noisy & 56.78 & 56.78 \\
 Non-uniform SS, integer LUT-Q $m=15$, noisy & 56.52 & 56.52 \\
-Non-uniform SS + PACT, integer LUT-Q $m=15$, noisy & 57.41 & 57.41 \\
-Non-uniform TU + PACT, integer LUT-Q $m=15$, noisy & -- & 57.19 \\
+Non-uniform SS + PACT, integer LUT-Q $m=15$, I16 input, noisy & -- & 60.21 \\
+Non-uniform TU + DKD, integer LUT-Q $m=15$, I16 input, noisy & -- & 60.20 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -167,7 +168,7 @@ Non-uniform TU + PACT, integer LUT-Q $m=15$, noisy & -- & 57.19 \\
 \section*{Next Updates}
 
 \begin{enumerate}
-  \item Investigate why minimal TU does not reproduce the expected 60\% non-uniform tutoring result.
+  \item Investigate why TU/DKD does not improve over the I16 SS checkpoint.
   \item Keep simulator reporting on the precomputed integer path with \texttt{raw\_noise=True}.
   \item Add hardware constraints once the PIM-side requirements are finalized.
 \end{enumerate}
