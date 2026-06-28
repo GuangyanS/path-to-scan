@@ -1,0 +1,17 @@
+[project]
+name = "path-to-scan"
+version = "0.1.0"
+description = "Minimal 4-channel ALL-CNN-C training on scan-generated CIFAR-100 RAW/RGGB H5 data."
+requires-python = ">=3.10"
+dependencies = [
+    "fire",
+    "h5py",
+    "numpy",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+cuda = ["torch"]
+
+[tool.uv]
+package = false

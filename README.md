@@ -1,36 +1,91 @@
-# ALL-CNN-on-CIFAR10
+# path-to-scan
 
-Pytorch Implementation of ALL-CNN in CIFAR10 Dataset 
+Minimal PyTorch training code for a 4-channel ALL-CNN-C model on scan-generated
+CIFAR-100 RAW/RGGB H5 data.
 
-the model can reach 93% accuracy in CIFAR-10 dataset 
+The default model is the version that worked best in our controlled run:
+`Conv -> BatchNorm2d -> ReLU` for the first 8 convolution layers, then a final
+logits conv plus global average pooling.
 
+## Data
 
-## Setting in Config
+Put the generated H5 file here:
 
-__model__: select the model to train.
+```bash
+datasets/cifar100_raw.h5
+```
 
-__state1-4__: the experient in paper using 4 traing stage with different learning-rate.
+The loader expects:
 
-__use_clip__: set ture to avoid the gradient explodsion.
+- `images`: `(N, 4, H, W)` or `(N, H, W, 4)`
+- `labels`: `(N,)`
+- `train`: boolean split mask
 
-__data_aug__: using crop and flip of images to augment the data.
+For CIFAR-100 this should be 50,000 train images and 10,000 test images.
 
-__use_cutout__: using [cutout](https://github.com/uoguelph-mlrg/Cutout) to augment the data.
+## Environment
 
+On the shared GPU machine, use the system CUDA PyTorch install:
 
+```bash
+uv venv --python /usr/bin/python3.10 --system-site-packages .venv
+uv run --no-sync python -m py_compile config.py h5_dataset.py main.py models/ALL_CNN_C.py
+```
 
---- 
+## Train
 
-## Command
+Use GPU 4 only:
 
-use the command below to train the model:
+```bash
+CUDA_VISIBLE_DEVICES=4 PYTHONUNBUFFERED=1 uv run python main.py train
+```
 
-### ALL-CNN-C model
+The defaults in `config.py` are set to the tested BN recipe:
 
-> python3 main.py train  --use_trained_model=False  --model='ALL_CNN_C' --lr1=0.1 --lr2=0.05 --lr3=0.01 --lr4=0.001 --weight_decay=0.0001 --use_clip=True --clip=2.0 --use_cutout=False --data_aug=False --class_id=1 --checkpoint_save_name='ALL_CNN_C'
+- 4-channel input, 100 classes
+- `Conv -> BatchNorm2d -> ReLU` in the first 8 conv layers
+- H5 data source: `./datasets/cifar100_raw.h5`
+- RAW augmentation and D300 pointwise noise enabled
+- SGD, batch size 128, lr 0.1, weight decay 1e-4
+- 5 epoch warmup, multistep milestones `100,150`
+- 200 epochs, best checkpoint saved to `checkpoints/`
 
-### ALL-CNN-C model (with data augmentation)
+## Test
 
-> python3 main.py train  --use_trained_model=False  --model='ALL_CNN_C' --lr1=0.1 --lr2=0.05 --lr3=0.01 --lr4=0.001 --weight_decay=0.0005 --use_clip=True --clip=2.0 --use_cutout=True --data_aug=True --checkpoint_save_name='ALL_CNN_C_aug'
+```bash
+CUDA_VISIBLE_DEVICES=4 uv run python main.py test \
+  --checkpoint_load_name='ALL_CNN_C_c100_rggb_h5_bn_refstyle'
+```
 
+For clean test data, disable test-time noise:
 
+```bash
+CUDA_VISIBLE_DEVICES=4 uv run python main.py test \
+  --checkpoint_load_name='ALL_CNN_C_c100_rggb_h5_bn_refstyle' \
+  --raw_noise=False
+```
+
+## Architecture
+
+Input: `4 x 16 x 16`
+
+| Layer | Operation | Cin -> Cout | Kernel | Stride | Output size |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1.1 | Conv+BN+ReLU | 4 -> 96 | 3x3 | 1 | 96 x 16 x 16 |
+| 1.2 | Conv+BN+ReLU | 96 -> 96 | 3x3 | 1 | 96 x 16 x 16 |
+| 1.3 | Conv+BN+ReLU | 96 -> 96 | 3x3 | 2 | 96 x 8 x 8 |
+| 2.1 | Conv+BN+ReLU | 96 -> 192 | 3x3 | 1 | 192 x 8 x 8 |
+| 2.2 | Conv+BN+ReLU | 192 -> 192 | 3x3 | 1 | 192 x 8 x 8 |
+| 2.3 | Conv+BN+ReLU | 192 -> 192 | 3x3 | 2 | 192 x 4 x 4 |
+| 3 | Conv+BN+ReLU | 192 -> 192 | 3x3 | 1 | 192 x 4 x 4 |
+| 4 | Conv+BN+ReLU | 192 -> 192 | 1x1 | 1 | 192 x 4 x 4 |
+| 5 | Conv logits + GAP | 192 -> 100 | 1x1 | 1 | 100 x 4 x 4 -> 100 |
+
+## Current Reference Result
+
+On `cifar100_raw.h5`, using GPU 4 and the default BN recipe:
+
+- training-log best test accuracy: `61.44%`
+- best checkpoint epoch: `173`
+- fixed clean test: `61.18%`
+- noisy test sanity check: `61.31%` with `--num_workers=0`
