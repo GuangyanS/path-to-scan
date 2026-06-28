@@ -8,6 +8,8 @@ class DefaultConfig(object):
     seed = 0
     checkpoint_load_name = None
     checkpoint_save_name = 'ALL_CNN_C_c100_rggb_h5_bn_refstyle'
+    fp32_checkpoint_name = 'ALL_CNN_C_c100_rggb_h5_bn_refstyle'
+    qat_checkpoint_save_name = 'ALL_CNN_C_c100_rggb_h5_w4a4_qat'
 
     test_model_path = './checkpoints/'
     use_trained_model = False
@@ -33,6 +35,9 @@ class DefaultConfig(object):
     max_epoch = 200
     lr = 0.1
     weight_decay = 0.0001
+    qat_max_epoch = 50
+    qat_lr = 0.001
+    qat_milestones = '30,45'
 
 
 def parse(self, kwargs):

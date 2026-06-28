@@ -68,50 +68,47 @@ def build_h5_loaders():
     return loader_train, loader_test
 
 
-def train(**kwargs):
-    opt.parse(kwargs)
-    set_seed(opt.seed)
-    if opt.disable_cudnn:
-        torch.backends.cudnn.enabled = False
-
-    loader_train, loader_test = build_h5_loaders()
-
+def get_device():
     if opt.use_gpu == True and torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
+        return torch.device('cuda')
+    return torch.device('cpu')
 
-    model = getattr(models, opt.model)(
-        num_classes=opt.num_classes, in_channels=opt.input_channels)
-    if opt.use_trained_model == True:
-        cp_name = opt.model
-        if opt.checkpoint_load_name != None:
-            cp_name = opt.checkpoint_load_name
-        model.load(opt.test_model_path + cp_name)
-    model.to(device)
 
-    lr = opt.lr
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9,
-                          weight_decay=opt.weight_decay, nesterov=True)
+def checkpoint_path(name):
+    path = opt.test_model_path + name
+    if not path.endswith('.pth'):
+        path += '.pth'
+    return path
 
-    if isinstance(opt.milestones, (tuple, list)):
-        milestones = [int(x) for x in opt.milestones]
-    else:
-        milestones = [int(x) for x in str(opt.milestones).split(',') if x]
-    if opt.warmup > 0:
+
+def parse_milestones(value):
+    if isinstance(value, (tuple, list)):
+        return [int(x) for x in value]
+    return [int(x) for x in str(value).split(',') if x]
+
+
+def make_scheduler(optimizer, milestones, warmup):
+    if warmup > 0:
         warmup_sched = optim.lr_scheduler.LinearLR(
-            optimizer, start_factor=0.01, total_iters=opt.warmup)
+            optimizer, start_factor=0.01, total_iters=warmup)
         main_sched = optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=milestones, gamma=0.1)
-        scheduler = optim.lr_scheduler.SequentialLR(
+        return optim.lr_scheduler.SequentialLR(
             optimizer, schedulers=[warmup_sched, main_sched],
-            milestones=[opt.warmup])
+            milestones=[warmup])
     else:
-        scheduler = optim.lr_scheduler.MultiStepLR(
+        return optim.lr_scheduler.MultiStepLR(
             optimizer, milestones=milestones, gamma=0.1)
 
+
+def fit(model, loader_train, loader_test, device, max_epoch, lr, milestones,
+        warmup, checkpoint_save_name):
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9,
+                          weight_decay=opt.weight_decay, nesterov=True)
+    scheduler = make_scheduler(optimizer, milestones, warmup)
+
     best_testacc = 0.0
-    for epoch in range(opt.max_epoch):
+    for epoch in range(max_epoch):
         model.train()
         for ii, (data, label) in tqdm(enumerate(loader_train)):
             data = data.to(device=device, dtype=torch.float32)
@@ -127,7 +124,7 @@ def train(**kwargs):
 
             if ii == 0:
                 print('Epoch [{}/{}], Loss: {:.4f}, lr :{: f}'
-                      .format(epoch + 1, opt.max_epoch, loss_now,
+                      .format(epoch + 1, max_epoch, loss_now,
                               optimizer.param_groups[0]['lr']))
 
         scheduler.step()
@@ -138,8 +135,28 @@ def train(**kwargs):
 
             if testacc > best_testacc:
                 best_testacc = testacc
-                saved = model.save(opt.checkpoint_save_name)
+                saved = model.save(checkpoint_save_name)
                 print('**  New best test acc %.2f%% -> saved %s' % (testacc * 100, saved))
+
+
+def train(**kwargs):
+    opt.parse(kwargs)
+    set_seed(opt.seed)
+    if opt.disable_cudnn:
+        torch.backends.cudnn.enabled = False
+
+    loader_train, loader_test = build_h5_loaders()
+    device = get_device()
+
+    model = getattr(models, opt.model)(
+        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    if opt.use_trained_model == True:
+        cp_name = opt.checkpoint_load_name or opt.model
+        model.load(opt.test_model_path + cp_name)
+    model.to(device)
+
+    fit(model, loader_train, loader_test, device, opt.max_epoch, opt.lr,
+        parse_milestones(opt.milestones), opt.warmup, opt.checkpoint_save_name)
 
 
 def test(**kwargs):
@@ -150,10 +167,7 @@ def test(**kwargs):
 
     _, loader_test = build_h5_loaders()
 
-    if opt.use_gpu == True and torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
+    device = get_device()
 
     model = getattr(models, opt.model)(
         num_classes=opt.num_classes, in_channels=opt.input_channels)
@@ -162,6 +176,76 @@ def test(**kwargs):
     model.load(opt.test_model_path + cp_name)
     model.to(device)
     check_acc(loader_test, model, device, name='test')
+
+
+def load_fp32_init_for_qat(model):
+    checkpoint = torch.load(
+        checkpoint_path(opt.fp32_checkpoint_name), map_location='cpu')
+    missing, unexpected = model.load_state_dict(
+        checkpoint['state_dict'], strict=False)
+    if unexpected:
+        raise RuntimeError('unexpected FP32 checkpoint keys: %s' % unexpected)
+    print('loaded FP32 init from %s' % checkpoint_path(opt.fp32_checkpoint_name))
+    print('missing QAT-only keys: %d' % len(missing))
+    model.epoch = 0
+    model.lr_pre_epoch = []
+    model.loss_pre_epoch = []
+    model.testacc_pre_epoch = []
+
+
+def qat_finetune(**kwargs):
+    opt.parse(kwargs)
+    set_seed(opt.seed)
+    if opt.disable_cudnn:
+        torch.backends.cudnn.enabled = False
+
+    loader_train, loader_test = build_h5_loaders()
+    device = get_device()
+
+    model = models.ALL_CNN_C_QAT(
+        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    load_fp32_init_for_qat(model)
+    model.to(device)
+
+    check_acc(loader_test, model, device, name='initial 4W4A test')
+    fit(model, loader_train, loader_test, device, opt.qat_max_epoch, opt.qat_lr,
+        parse_milestones(opt.qat_milestones), 0, opt.qat_checkpoint_save_name)
+
+
+def qat_test(**kwargs):
+    opt.parse(kwargs)
+    set_seed(opt.seed)
+    if opt.disable_cudnn:
+        torch.backends.cudnn.enabled = False
+
+    _, loader_test = build_h5_loaders()
+    device = get_device()
+
+    model = models.ALL_CNN_C_QAT(
+        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
+    model.load(opt.test_model_path + cp_name)
+    model.to(device)
+    check_acc(loader_test, model, device, name='4W4A test')
+
+
+def real_quant_test(**kwargs):
+    opt.parse(kwargs)
+    set_seed(opt.seed)
+    if opt.disable_cudnn:
+        torch.backends.cudnn.enabled = False
+
+    _, loader_test = build_h5_loaders()
+    device = get_device()
+
+    qat_model = models.ALL_CNN_C_QAT(
+        num_classes=opt.num_classes, in_channels=opt.input_channels)
+    cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
+    qat_model.load(opt.test_model_path + cp_name)
+    qat_model.eval()
+
+    model = models.ALL_CNN_C_INT4(qat_model).to(device)
+    check_acc(loader_test, model, device, name='real int4 W / int4 A test')
 
 
 if __name__ == '__main__':

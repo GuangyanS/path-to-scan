@@ -65,6 +65,28 @@ CUDA_VISIBLE_DEVICES=4 uv run python main.py test \
   --raw_noise=False
 ```
 
+## 4W4A QAT
+
+Fine-tune the 4-bit model from the FP32 checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 PYTHONUNBUFFERED=1 uv run --no-sync python main.py qat_finetune
+```
+
+QAT uses fake quantization with STE during training, then `real_quant_test`
+materializes integer codes for evaluation:
+
+- folded Conv+BN weights use signed int4 codes in `[-7, 7]`
+- activations use unsigned int4 codes in `[0, 15]`
+- Conv bias after BN folding remains FP32
+
+Evaluate the saved QAT checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py real_quant_test --raw_noise=False
+CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py real_quant_test
+```
+
 ## Architecture
 
 Input: `4 x 16 x 16`
@@ -89,3 +111,11 @@ On `cifar100_raw.h5`, using GPU 4 and the default BN recipe:
 - best checkpoint epoch: `173`
 - fixed clean test: `61.18%`
 - noisy test sanity check: `61.31%` with `--num_workers=0`
+
+For 4W4A QAT from the FP32 checkpoint:
+
+- initial fake-quant clean test: `34.65%`
+- QAT training-log best noisy test: `56.84%`
+- best QAT checkpoint epoch: `34`
+- real quant clean test: `57.09%`
+- real quant noisy test: `56.60%`
