@@ -12,7 +12,7 @@ class BasicModule(torch.nn.Module):
         self.loss_pre_epoch = []
         self.testacc_pre_epoch = []
 
-    def load(self, path):
+    def load(self, path, strict=True):
         # tolerate names with or without the .pth suffix
         if not os.path.exists(path) and os.path.exists(path + '.pth'):
             path = path + '.pth'
@@ -21,7 +21,13 @@ class BasicModule(torch.nn.Module):
         self.lr_pre_epoch = checkpoint['lr']
         self.loss_pre_epoch = checkpoint['loss']
         self.testacc_pre_epoch = checkpoint['testacc']
-        self.load_state_dict(checkpoint['state_dict'])
+        incompatible = self.load_state_dict(checkpoint['state_dict'],
+                                            strict=strict)
+        if not strict:
+            print('loaded %s with missing keys: %d, unexpected keys: %d'
+                  % (path, len(incompatible.missing_keys),
+                     len(incompatible.unexpected_keys)))
+        return incompatible
 
     def save(self, name=None):
         if name is None:

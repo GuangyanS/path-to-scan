@@ -65,6 +65,47 @@ CUDA_VISIBLE_DEVICES=4 uv run python main.py test \
   --raw_noise=False
 ```
 
+## Full-Precision PCN
+
+`ALL_CNN_C_PCN` adds local predictive-coding recurrences to the first eight
+ALL-CNN-C conv layers. The recurrent update uses learned non-negative per-filter
+`alpha`, feedback transposed convolutions, and 1x1 bypass convolutions.
+
+Start from the FP32 ALL-CNN-C checkpoint with non-strict loading because the PCN
+feedback, bypass, and alpha tensors are new:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py test \
+  --model=ALL_CNN_C_PCN \
+  --pcn_cycles=3 \
+  --checkpoint_load_name=ALL_CNN_C_c100_rggb_h5_bn_refstyle \
+  --checkpoint_load_strict=False \
+  --raw_noise=False \
+  --num_workers=0
+```
+
+Fine-tune from the same checkpoint:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 PYTHONUNBUFFERED=1 uv run --no-sync python main.py train \
+  --model=ALL_CNN_C_PCN \
+  --pcn_cycles=3 \
+  --use_trained_model=True \
+  --checkpoint_load_name=ALL_CNN_C_c100_rggb_h5_bn_refstyle \
+  --checkpoint_load_strict=False \
+  --checkpoint_save_name=ALL_CNN_C_PCN_c100_rggb_h5_t3_ft \
+  --lr=0.001 \
+  --warmup=0
+```
+
+Initial GPU 4 comparison with `num_workers=0`:
+
+- baseline clean: `61.18%`
+- PCN checkpoint-start clean: `61.15%`
+- PCN after 1 epoch fine-tune clean: `61.20%`
+- baseline noisy: `61.31%`
+- PCN after 1 epoch fine-tune noisy: `61.51%`
+
 ## 4W4A QAT
 
 Fine-tune the 4-bit model from the FP32 checkpoint:
@@ -85,6 +126,51 @@ Evaluate the saved QAT checkpoint:
 ```bash
 CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py real_quant_test --raw_noise=False
 CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py real_quant_test
+```
+
+For integer-domain simulation, use:
+
+```bash
+uv run --no-sync python main.py int4_sim_test --raw_noise=False --use_gpu=False --num_workers=0
+```
+
+This path lives in `simulator/`. It keeps activations as uint4 codes, weights
+as signed int4 codes, uses int32 conv accumulation, and requantizes with
+precomputed per-layer constants. It runs on CPU because PyTorch does not provide
+a CUDA int4/int32 conv kernel.
+
+## QKD
+
+The QKD code is self-contained. Put the EfficientNetV2-L teacher checkpoint at:
+
+```bash
+checkpoints/b4_100.pth
+```
+
+Then verify the teacher:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py teacher_test --raw_noise=False --num_workers=0 --batch_size=16
+```
+
+Run stages with `qkd_finetune` and set `qkd_stage` to `SS`, `CS`, or `TU`.
+
+```bash
+CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py qkd_finetune --qkd_stage=SS
+CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py qkd_finetune --qkd_stage=CS
+CUDA_VISIBLE_DEVICES=4 uv run --no-sync python main.py qkd_finetune --qkd_stage=TU
+```
+
+By default, SS saves `*_qkd_ss.pth`, CS loads that and saves `*_qkd_cs.pth`,
+and TU loads `*_qkd_cs.pth`.
+
+For the current best minimal run, TU was started from the SS student while using
+the co-studied teacher:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 PYTHONUNBUFFERED=1 uv run --no-sync python main.py qkd_finetune \
+  --qkd_stage=TU \
+  --qkd_student_checkpoint_name=ALL_CNN_C_c100_rggb_h5_w4a4_qkd_ss
 ```
 
 ## Architecture
@@ -119,3 +205,14 @@ For 4W4A QAT from the FP32 checkpoint:
 - best QAT checkpoint epoch: `34`
 - real quant clean test: `57.09%`
 - real quant noisy test: `56.60%`
+
+For the self-contained QKD flow:
+
+- `b4_100.pth` teacher is 4-channel RAW/RGGB, not RGB
+- original teacher eval: `77.30%` clean, `77.33%` noisy
+- one-epoch co-studied teacher eval: `78.70%` noisy
+- SS best noisy test: `56.11%`
+- TU best checkpoint history: `56.27%`
+- QAT eval with `num_workers=0`: `56.02%` noisy, `56.17%` clean
+- true INT4 simulator: `56.02%` noisy, `56.17%` clean
+- simulator code ranges: weights `[-7, 7]`, activations `[0, 15]`

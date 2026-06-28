@@ -56,6 +56,131 @@ class ALL_CNN_C(BasicModule):
         return torch.flatten(x, 1)
 
 
+def _make_feedback_conv(conv):
+    output_padding = tuple(max(0, stride - 1) for stride in conv.stride)
+    return nn.ConvTranspose2d(
+        conv.out_channels, conv.in_channels, conv.kernel_size,
+        stride=conv.stride, padding=conv.padding,
+        output_padding=output_padding, bias=False)
+
+
+def _make_bypass_conv(conv):
+    return nn.Conv2d(
+        conv.in_channels, conv.out_channels, 1, stride=conv.stride,
+        bias=False)
+
+
+def _alpha_parameter(channels, init_value):
+    if init_value < 0:
+        raise ValueError('pcn_alpha_init must be >= 0')
+    return nn.Parameter(torch.full((channels,), float(init_value)))
+
+
+def _match_spatial(x, target):
+    target_h, target_w = target.shape[-2:]
+    if x.size(-2) > target_h:
+        x = x[..., :target_h, :]
+    if x.size(-1) > target_w:
+        x = x[..., :, :target_w]
+    pad_h = target_h - x.size(-2)
+    pad_w = target_w - x.size(-1)
+    if pad_h > 0 or pad_w > 0:
+        x = F.pad(x, (0, pad_w, 0, pad_h))
+    return x
+
+
+class ALL_CNN_C_PCN(ALL_CNN_C):
+    """ALL-CNN-C with local predictive-coding recurrences on conv1-conv8."""
+
+    def __init__(self, num_classes=100, in_channels=4,
+                 pcn_cycles=3, pcn_alpha_init=0.000001):
+        super(ALL_CNN_C_PCN, self).__init__(num_classes, in_channels)
+        self.model_name = 'ALL_CNN_C_PCN'
+        self.pcn_cycles = int(pcn_cycles)
+
+        self.fb1 = _make_feedback_conv(self.conv1)
+        self.fb2 = _make_feedback_conv(self.conv2)
+        self.fb3 = _make_feedback_conv(self.conv3)
+        self.fb4 = _make_feedback_conv(self.conv4)
+        self.fb5 = _make_feedback_conv(self.conv5)
+        self.fb6 = _make_feedback_conv(self.conv6)
+        self.fb7 = _make_feedback_conv(self.conv7)
+        self.fb8 = _make_feedback_conv(self.conv8)
+
+        self.bp1 = _make_bypass_conv(self.conv1)
+        self.bp2 = _make_bypass_conv(self.conv2)
+        self.bp3 = _make_bypass_conv(self.conv3)
+        self.bp4 = _make_bypass_conv(self.conv4)
+        self.bp5 = _make_bypass_conv(self.conv5)
+        self.bp6 = _make_bypass_conv(self.conv6)
+        self.bp7 = _make_bypass_conv(self.conv7)
+        self.bp8 = _make_bypass_conv(self.conv8)
+
+        self.alpha1 = _alpha_parameter(96, pcn_alpha_init)
+        self.alpha2 = _alpha_parameter(96, pcn_alpha_init)
+        self.alpha3 = _alpha_parameter(96, pcn_alpha_init)
+        self.alpha4 = _alpha_parameter(192, pcn_alpha_init)
+        self.alpha5 = _alpha_parameter(192, pcn_alpha_init)
+        self.alpha6 = _alpha_parameter(192, pcn_alpha_init)
+        self.alpha7 = _alpha_parameter(192, pcn_alpha_init)
+        self.alpha8 = _alpha_parameter(192, pcn_alpha_init)
+
+    def _pcn_layers(self):
+        return (
+            (self.conv1, self.bn1, self.fb1, self.bp1, self.alpha1),
+            (self.conv2, self.bn2, self.fb2, self.bp2, self.alpha2),
+            (self.conv3, self.bn3, self.fb3, self.bp3, self.alpha3),
+            (self.conv4, self.bn4, self.fb4, self.bp4, self.alpha4),
+            (self.conv5, self.bn5, self.fb5, self.bp5, self.alpha5),
+            (self.conv6, self.bn6, self.fb6, self.bp6, self.alpha6),
+            (self.conv7, self.bn7, self.fb7, self.bp7, self.alpha7),
+            (self.conv8, self.bn8, self.fb8, self.bp8, self.alpha8),
+        )
+
+    def init_pcn_extras_from_feedforward(self, zero_bypass=True):
+        with torch.no_grad():
+            for conv, _, fb, bp, _ in self._pcn_layers():
+                fb.weight.copy_(conv.weight)
+                if zero_bypass:
+                    bp.weight.zero_()
+
+    def _pcn_layer(self, x, conv, bn, fb, bp, alpha):
+        state = F.relu(bn(conv(x)))
+        alpha = torch.clamp(alpha, min=0.0).view(1, -1, 1, 1)
+        for _ in range(self.pcn_cycles):
+            pred = _match_spatial(fb(state), x)
+            error = F.relu(x - pred)
+            state = state + alpha * conv(error)
+        bypass = _match_spatial(bp(x), state)
+        return state + bypass
+
+    def forward(self, x):
+        x = self._pcn_layer(x, self.conv1, self.bn1, self.fb1, self.bp1,
+                            self.alpha1)
+        x = self._pcn_layer(x, self.conv2, self.bn2, self.fb2, self.bp2,
+                            self.alpha2)
+        x = self._pcn_layer(x, self.conv3, self.bn3, self.fb3, self.bp3,
+                            self.alpha3)
+        x = self.dp1(x)
+
+        x = self._pcn_layer(x, self.conv4, self.bn4, self.fb4, self.bp4,
+                            self.alpha4)
+        x = self._pcn_layer(x, self.conv5, self.bn5, self.fb5, self.bp5,
+                            self.alpha5)
+        x = self._pcn_layer(x, self.conv6, self.bn6, self.fb6, self.bp6,
+                            self.alpha6)
+        x = self.dp2(x)
+
+        x = self._pcn_layer(x, self.conv7, self.bn7, self.fb7, self.bp7,
+                            self.alpha7)
+        x = self._pcn_layer(x, self.conv8, self.bn8, self.fb8, self.bp8,
+                            self.alpha8)
+        x = self.conv9(x)
+
+        x = self.avg(x)
+        return torch.flatten(x, 1)
+
+
 def fake_quant_weight_4bit(weight):
     qmax = 7.0
     scale = weight.detach().abs().amax(dim=(1, 2, 3), keepdim=True)
