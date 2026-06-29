@@ -47,7 +47,7 @@
 
 \node[stage=qat, right=0.65cm of s1] (s2) {
   \textbf{W4A4 QAT}\\[2pt]
-  LUTQ / uniform W4\\
+  uniform W4\\
   PACT activations\\
   integer simulator
 };
@@ -114,7 +114,7 @@ Phase & Experiment & Precision / path & Acc. (\%) & Notes \\
 1 & RGB AllCNN-C + BN & FP32 float & 72.99 & Standard CIFAR-100 RGB, $3\times32\times32$, crop/flip augmentation; \texttt{checkpoints/ALL\_CNN\_C\_c100\_rgb\_aug\_bn\_refstyle.pth}. \\
 1 & RAW/RGGB AllCNN-C & FP32 float & 61.31 & Current 4-channel RGGB BN baseline, \texttt{raw\_noise=True}. \\
 2 & RAW/RGGB W4A4 SS & uniform W4A4 INT sim & 56.61 & Main noisy self-studying baseline; use uniform path going forward. \\
-2 & RAW/RGGB W4A4 SS + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & 60.21 & Gain comes from PACT/I16 and simulator alignment, not non-uniform codebook. \\
+2 & RAW/RGGB W4A4 SS + PACT & uniform I16/W4/A4 INT sim & 60.01 & Rerun with \texttt{qkd\_use\_lutq=False}; gain comes from PACT/I16 and simulator alignment, not non-uniform codebook. \\
 3 & QKD CS + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & 61.24 & Co-studying result from simulator. \\
 3 & QKD TU + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & \textbf{61.66} & Current best dense int4 simulator result. \\
 4 & PIM-QAT BN-only & spec W4/A4/ADC7 & 49.63 & First completed PIM row-sparse run; target is 57--58, needs tuning. \\
@@ -134,7 +134,7 @@ Model / stage & Acc. (\%) & Notes \\
 EfficientNetV2-L teacher, clean & 77.30 & Verified on current H5 test split. \\
 EfficientNetV2-L teacher, noisy & 77.33 & Default noisy evaluation. \\
 Co-studied teacher, noisy & 78.70 & Earlier CS run improved teacher. \\
-QKD SS rerun & 60.21 & I16/W4/A4 equal-spaced LUT-Q + PACT, fixed simulator. \\
+Uniform SS + PACT rerun & 60.01 & I16/W4/A4, \texttt{qkd\_use\_lutq=False}, fixed integer simulator. \\
 QKD CS rerun & 61.24 & I16/W4/A4 equal-spaced LUT-Q + PACT, fixed simulator. \\
 QKD TU rerun & 61.66 & Best current dense int4 simulator result. \\
 \bottomrule
@@ -151,7 +151,7 @@ QKD TU rerun & 61.66 & Best current dense int4 simulator result. \\
 Item & Current setting \\
 \midrule
 Model & ALL-CNN-C, 4-channel RGGB input, BatchNorm; GBN and PCN disabled for the minimal pass. \\
-Weights & LUT-Q 4-bit with deployed integer codebook $[-7,\ldots,7]$ and precomputed per-8-output-channel scales. \\
+Weights & Uniform 4-bit with deployed integer code range $[-7,\ldots,7]$ and precomputed per-output-channel scales. \\
 Activations & First layer input is unsigned I16; hidden activations are unsigned A4 codes in $[0,15]$ and values in $[0,1]$. \\
 Rows & Stage1.0 and logits are unmasked. Masked layers keep 48/144 rows; stage1.1 hybrid keeps 72/144 rows. \\
 ADC & 7-bit mid-rise tile ADC, fixed window $W=K$, no read noise in the current training run. \\
