@@ -1,25 +1,23 @@
 \documentclass[10pt]{article}
 
-\usepackage[margin=0.75in]{geometry}
+\usepackage[margin=0.65in]{geometry}
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{tabularx}
-\usepackage{siunitx}
 \usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,calc}
 \usepackage{hyperref}
 
-\hypersetup{
-  colorlinks=true,
-  linkcolor=black,
-  urlcolor=blue
-}
+\definecolor{fp}{RGB}{70,130,70}
+\definecolor{dist}{RGB}{160,100,30}
+\definecolor{qat}{RGB}{50,100,180}
+\definecolor{sp}{RGB}{180,60,60}
+\definecolor{hw}{RGB}{120,50,160}
+\definecolor{evalc}{RGB}{0,120,130}
+\definecolor{arrow}{RGB}{50,50,50}
 
-\sisetup{
-  round-mode=places,
-  round-precision=2
-}
-
-\newcommand{\pending}{\textcolor{gray}{pending}}
+\hypersetup{colorlinks=true, linkcolor=black, urlcolor=blue}
 
 \title{ScAN - A Path to PIM Hardware-aware Network}
 \author{}
@@ -28,144 +26,150 @@
 \begin{document}
 \maketitle
 
-\section*{Student Network}
+\section*{Phase Roadmap}
 
-The current student network uses 4-channel RGGB input at spatial size
-$16\times16$. The first eight convolutions are
-\texttt{Conv2d + BatchNorm2d + ReLU}; the final layer is a logits convolution
-followed by global average pooling.
+\begin{center}
+\begin{tikzpicture}[
+    >=Stealth,
+    stage/.style={draw=#1, fill=#1!8, rounded corners=5pt,
+                  minimum width=2.85cm, minimum height=1.55cm,
+                  font=\footnotesize, align=center, line width=0.8pt,
+                  text width=2.65cm},
+    arr/.style={draw=arrow, ->, line width=0.8pt},
+    phaselabel/.style={font=\footnotesize\bfseries, text=#1},
+    scale=0.92, transform shape
+]
+\node[stage=fp] (s1) {
+  \textbf{Float Training}\\[2pt]
+  AllCNN-C\\
+  CIFAR-100 FP32
+};
 
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{@{}l l r r r r@{}}
-\toprule
-Layer & Operation & $C_{\mathrm{in}}\rightarrow C_{\mathrm{out}}$ & Kernel & Stride & Output \\
-\midrule
-1.1 & Conv+BN+ReLU & $4\rightarrow96$ & $3\times3$ & 1 & $96\times16\times16$ \\
-1.2 & Conv+BN+ReLU & $96\rightarrow96$ & $3\times3$ & 1 & $96\times16\times16$ \\
-1.3 & Conv+BN+ReLU & $96\rightarrow96$ & $3\times3$ & 2 & $96\times8\times8$ \\
-2.1 & Conv+BN+ReLU & $96\rightarrow192$ & $3\times3$ & 1 & $192\times8\times8$ \\
-2.2 & Conv+BN+ReLU & $192\rightarrow192$ & $3\times3$ & 1 & $192\times8\times8$ \\
-2.3 & Conv+BN+ReLU & $192\rightarrow192$ & $3\times3$ & 2 & $192\times4\times4$ \\
-3 & Conv+BN+ReLU & $192\rightarrow192$ & $3\times3$ & 1 & $192\times4\times4$ \\
-4 & Conv+BN+ReLU & $192\rightarrow192$ & $1\times1$ & 1 & $192\times4\times4$ \\
-5 & Conv logits + GAP & $192\rightarrow100$ & $1\times1$ & 1 & $100\times4\times4\rightarrow100$ \\
-\bottomrule
-\end{tabular}
-\end{table}
+\node[stage=qat, right=0.65cm of s1] (s2) {
+  \textbf{W4A4 QAT}\\[2pt]
+  LUTQ / uniform W4\\
+  PACT activations\\
+  integer simulator
+};
 
-\section*{Current Results}
+\node[stage=dist, right=0.65cm of s2] (s3) {
+  \textbf{KD Finetune}\\[2pt]
+  EfficientNet teacher\\
+  SS / CS / TU
+};
+
+\node[stage=sp, right=0.65cm of s3] (s4) {
+  \textbf{PIM Row Sparsity}\\[2pt]
+  2/3 rows off\\
+  ADC7 + digital BN\\
+  current tuning
+};
+
+\node[stage=sp, below=1.15cm of s1] (s5) {
+  \textbf{PCN Integration}\\[2pt]
+  3-iter fb/ff refine\\
+  sensitive channels\\
+  $\beta=1/8$
+};
+
+\node[stage=hw, right=0.65cm of s5] (s6) {
+  \textbf{HW Noise Finetune}\\[2pt]
+  real F/G/H LUT\\
+  voltage readout\\
+  noise model
+};
+
+\node[stage=evalc, right=0.65cm of s6] (s7) {
+  \textbf{Final Eval}\\[2pt]
+  HW simulator\\
+  full noise model\\
+  multi-seed
+};
+
+\node[phaselabel=fp, above=0.18cm of s1] {Phase 1};
+\node[phaselabel=qat, above=0.18cm of s2] {Phase 2};
+\node[phaselabel=dist, above=0.18cm of s3] {Phase 3};
+\node[phaselabel=sp, above=0.18cm of s4] {Phase 4};
+\node[phaselabel=sp, above=0.18cm of s5] {Phase 5};
+\node[phaselabel=hw, above=0.18cm of s6] {Phase 6};
+
+\draw[arr] (s1) -- (s2);
+\draw[arr] (s2) -- (s3);
+\draw[arr] (s3) -- (s4);
+\draw[arr] (s4.south) -- ++(0,-0.35) -| (s5.north);
+\draw[arr] (s5) -- (s6);
+\draw[arr] (s6) -- (s7);
+\end{tikzpicture}
+\end{center}
+
+\section*{Phase Results}
 
 \begin{table}[h]
 \centering
 \small
 \begin{tabularx}{\linewidth}{@{}l l l r X@{}}
 \toprule
-Experiment & Precision & Eval path & Acc. (\%) & Notes \\
+Phase & Experiment & Precision / path & Acc. (\%) & Notes \\
 \midrule
-RGB FP32 reference & FP32 & float & \pending & Legacy RGB result should be rerun if needed for a strict comparison. \\
-RAW/RGGB FP32 & FP32 & float & 61.31 & Default noisy test sanity check; training-log best is 61.44. \\
-RAW/RGGB FP32 & FP32 & float & 61.18 & Clean test, \texttt{raw\_noise=False}. \\
-RAW/RGGB QAT & W4A4 uniform & INT simulator & 56.61 & Current validated noisy simulator baseline. \\
-RAW/RGGB QAT & W4A4 uniform & INT simulator & 57.09 & Clean simulator reference from previous run. \\
-QKD uniform, first pass & W4A4 uniform & INT simulator & 56.02 & Worse than QAT; not accepted as final QKD. \\
-QKD uniform, matched schedule & W4A4 uniform & INT simulator & 56.93 & Partial CS rerun best; below non-uniform path. \\
-QKD non-uniform SS & W4A4 integer LUT-Q, $m=7$ & codebook INT simulator & 56.78 & Integer LUT values $[-7,\ldots,7]$. \\
-QKD non-uniform SS & W4A4 integer LUT-Q, $m=15$ & codebook INT simulator & 56.52 & Integer LUT values $[-14,-12,\ldots,14]$; training-log best 57.06. \\
-QKD non-uniform SS + PACT & I16/W4/A4 integer LUT-Q, $m=15$ & codebook INT simulator & 60.21 & Full rerun; training-log best 60.66. \\
-QKD non-uniform CS + PACT & I16/W4/A4 integer LUT-Q, $m=15$ & codebook INT simulator & 61.24 & Full rerun; training-log best 61.39. \\
-QKD non-uniform TU + PACT & I16/W4/A4 integer LUT-Q, $m=15$ & codebook INT simulator & \textbf{61.66} & Full rerun; training-log best 61.81. \\
+1 & RGB AllCNN-C & FP32 float & 60.50 & \texttt{checkpoints/archive/ALL\_CNN\_C\_c100\_noaug.pth}; conv1 is 3-channel RGB. \\
+1 & RAW/RGGB AllCNN-C & FP32 float & 61.31 & Current 4-channel RGGB BN baseline, \texttt{raw\_noise=True}. \\
+1 & RAW/RGGB AllCNN-C & FP32 float & 61.18 & Clean test, \texttt{raw\_noise=False}. \\
+2 & RAW/RGGB W4A4 & uniform W4A4 INT sim & 56.61 & Validated noisy simulator baseline. \\
+2 & RAW/RGGB W4A4 & uniform W4A4 INT sim & 57.09 & Clean simulator reference. \\
+2 & non-uniform SS & integer LUT-Q $m=7$ & 56.78 & Integer LUT values $[-7,\ldots,7]$. \\
+2 & non-uniform SS & integer LUT-Q $m=15$ & 56.52 & Integer LUT values $[-14,-12,\ldots,14]$. \\
+2 & non-uniform SS + PACT & I16/W4/A4 LUT-Q $m=15$ & 60.21 & Fixed integer simulator, \texttt{raw\_noise=True}. \\
+3 & QKD CS + PACT & I16/W4/A4 LUT-Q $m=15$ & 61.24 & Co-studying result from simulator. \\
+3 & QKD TU + PACT & I16/W4/A4 LUT-Q $m=15$ & \textbf{61.66} & Current best dense int4 simulator result. \\
+4 & PIM-QAT BN-only & spec W4/A4/ADC7 & 49.63 & First completed PIM row-sparse run; target is 57--58, needs tuning. \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\section*{QKD Setup}
-
-The teacher checkpoint \texttt{b4\_100.pth} uses 4-channel RAW/RGGB input, not
-RGB input. Teacher preprocessing upsamples RGGB tensors to $224\times224$ and
-normalizes with $(x-0.5)/0.5$.
+\section*{Teacher / KD}
 
 \begin{table}[h]
 \centering
 \small
 \begin{tabular}{@{}l r l@{}}
 \toprule
-Teacher / stage & Acc. (\%) & Notes \\
+Model / stage & Acc. (\%) & Notes \\
 \midrule
 EfficientNetV2-L teacher, clean & 77.30 & Verified on current H5 test split. \\
 EfficientNetV2-L teacher, noisy & 77.33 & Default noisy evaluation. \\
-Co-studied teacher, noisy & 78.70 & Earlier short CS run improved teacher. \\
+Co-studied teacher, noisy & 78.70 & Earlier CS run improved teacher. \\
 QKD SS rerun & 60.21 & I16/W4/A4 LUT-Q + PACT, fixed simulator. \\
 QKD CS rerun & 61.24 & I16/W4/A4 LUT-Q + PACT, fixed simulator. \\
-QKD TU rerun & 61.66 & Current best dense int4 simulator result. \\
+QKD TU rerun & 61.66 & Best current dense int4 simulator result. \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\section*{Integer Simulator}
-
-The dense int4 simulator is the reporting path for quantized inference. It
-runs on CPU because PyTorch does not provide the exact CUDA int4/int32
-convolution kernel we need here.
-
-\begin{itemize}
-  \item The first layer input uses unsigned 16-bit input codes in $[0,65535]$.
-  \item Hidden activations use unsigned 4-bit activation codes in $[0,15]$.
-  \item Uniform weights use signed 4-bit codes in $[-7,7]$ plus per-output-channel scales.
-  \item Non-uniform weights use 4-bit indices into an integer LUT-Q codebook; the current best checkpoint uses integer LUT values $[-14,-12,\ldots,14]$.
-  \item Convolution uses int32 accumulation.
-  \item Requantization uses precomputed layer constants derived from activation and weight scales.
-  \item BatchNorm is folded into convolution weights/bias before simulator execution.
-  \item Weight-side QAT transforms are exported offline into integer weight codes and scales. Simulator forward does not run \texttt{tanh}, k-means, nearest-LUT search, or weight quantization.
-  \item Final logits are dequantized to FP32 after the final integer convolution and then globally averaged.
-\end{itemize}
-
-For the current uniform QAT checkpoint and non-uniform QKD checkpoints,
-fake-quant and simulator reporting are aligned under deterministic loader
-settings:
+\section*{Current PIM Setting}
 
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{@{}l r r@{}}
+\begin{tabularx}{\linewidth}{@{}l X@{}}
 \toprule
-Setting & Fake QAT (\%) & INT simulator (\%) \\
+Item & Current setting \\
 \midrule
-Noisy, \texttt{raw\_noise=True}, \texttt{num\_workers=0} & 56.61 & 56.61 \\
-Clean, \texttt{raw\_noise=False}, \texttt{num\_workers=0} & 57.09 & 57.09 \\
-Non-uniform SS, integer LUT-Q $m=7$, noisy & 56.78 & 56.78 \\
-Non-uniform SS, integer LUT-Q $m=15$, noisy & 56.52 & 56.52 \\
-Non-uniform SS + PACT, integer LUT-Q $m=15$, I16 input, noisy & -- & 60.21 \\
-Non-uniform CS + PACT, integer LUT-Q $m=15$, I16 input, noisy & -- & 61.24 \\
-Non-uniform TU + PACT, integer LUT-Q $m=15$, I16 input, noisy & -- & 61.66 \\
+Model & ALL-CNN-C, 4-channel RGGB input, BatchNorm; GBN and PCN disabled for the minimal pass. \\
+Weights & LUT-Q 4-bit with deployed integer codebook $[-7,\ldots,7]$ and precomputed per-8-output-channel scales. \\
+Activations & First layer input is unsigned I16; hidden activations are unsigned A4 codes in $[0,15]$ and values in $[0,1]$. \\
+Rows & Stage1.0 and logits are unmasked. Masked layers keep 48/144 rows; stage1.1 hybrid keeps 72/144 rows. \\
+ADC & 7-bit mid-rise tile ADC, fixed window $W=K$, no read noise in the current training run. \\
+Simulator & PIM-QAT forward and PIM simulator are numerically matched on smoke tests; deployed inference uses integer weights/activations and precomputed constants. \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
-\section*{PIM Conv Status}
-
-Implemented an explicit PIM-QAT model path and PIM simulator path without
-changing the default dense-QKD path. The current minimal PIM path keeps the
-existing BN student model; GBN/PCN are not enabled in this pass.
-
-The PIM path follows \texttt{pim\_info/scanpcn\_inference\_spec.tex}: row
-select over $[18,18,36,72]$ chunks, keep 48 of 144 rows by default, hybrid
-stage1.1 keep 72 of 144 rows, 7-bit mid-rise tile ADC, digital BN scale/bias,
-normalized hidden DAC activations in $[0,1]$, and unmasked stage1.0 / logits
-layers. PIM-QAT eval and PIM simulator are numerically matched on the TU
-checkpoint smoke input (\texttt{max\_abs\_diff} $\le 6\times10^{-7}$).
-
-\section*{Current Best}
-
-\texttt{checkpoints/rerun/qkd\_i16\_intlut\_pact\_g8m15\_lutq\_tu.pth}
-
-\section*{Next Updates}
+\section*{Next}
 
 \begin{enumerate}
-  \item Train the PIM-QAT model from the current dense int4 checkpoint.
-  \item Report all new PIM results through \texttt{pim\_sim\_test} with \texttt{raw\_noise=True}.
-  \item Add GBN/PCN only after the minimal BN PIM path is stable.
+  \item Improve Phase 4 PIM-QAT accuracy from the current 49.63\% toward 57--58\%.
+  \item Add the \texttt{pim\_info/harware\_model.tex} voltage-domain readout as an optional hardware simulator once F/G/H and noise parameters are specified.
+  \item Add PCN only after the minimal BN row-sparse PIM path is stable.
 \end{enumerate}
 
 \end{document}
