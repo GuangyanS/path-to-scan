@@ -1,65 +1,17 @@
 \documentclass[10pt]{article}
-
 \usepackage[margin=0.75in]{geometry}
 \usepackage{booktabs}
-\usepackage{array}
 \usepackage{tabularx}
-\usepackage{siunitx}
-\usepackage{xcolor}
 \usepackage{hyperref}
 
-\hypersetup{
-  colorlinks=true,
-  linkcolor=black,
-  urlcolor=blue
-}
-
-\sisetup{
-  round-mode=places,
-  round-precision=2
-}
-
-\newcommand{\pending}{\textcolor{gray}{pending}}
-
-\title{ScAN - A Path to PIM Hardware-ware Network}
+\title{ScAN - A Path to PIM Hardware-aware Network}
 \author{}
 \date{\today}
 
 \begin{document}
 \maketitle
 
-\section*{Scope}
-
-This note tracks the current CIFAR-100 path from RGB/FP32 references to
-RAW-RGGB training, 4W4A quantization, and QKD.  Unless stated otherwise,
-reported test accuracy uses the default RAW noise setting
-\texttt{raw\_noise=True}.  Quantized results should be reported from the
-integer simulator, not from fake-quant training metrics.
-
-\section*{Pipeline Summary}
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabularx}{\linewidth}{@{}l l l l X@{}}
-\toprule
-Stage & Input & Model & Inference path & Current status \\
-\midrule
-RGB FP32 & RGB CIFAR-100 & legacy FP32 CNN & floating point & Legacy reference only; rerun not yet in this repo. \\
-RAW/RGGB FP32 & 4-channel RGGB & ALL-CNN-C + BN & floating point & Current reproducible baseline. \\
-RAW/RGGB W4A4 & 4-channel RGGB & ALL-CNN-C QAT & INT simulator & Uniform W4A4 baseline validated. \\
-QKD uniform & 4-channel RGGB & QAT student + EfficientNetV2-L teacher & INT simulator & Matched-schedule partial rerun did not beat current best. \\
-QKD non-uniform & 4-channel RGGB & QAT + integer LUT-Q weight codebook + PACT & codebook INT simulator & Current best validated simulator checkpoint. \\
-\bottomrule
-\end{tabularx}
-\end{table}
-
-\section*{Network}
-
-The current student network uses 4-channel RGGB input at spatial size
-$16\times16$.  The first eight convolutions are
-\texttt{Conv2d + BatchNorm2d + ReLU}; the final layer is a logits convolution
-followed by global average pooling.
+\section*{Student Network}
 
 \begin{table}[h]
 \centering
@@ -81,96 +33,51 @@ Layer & Operation & $C_{\mathrm{in}}\rightarrow C_{\mathrm{out}}$ & Kernel & Str
 \end{tabular}
 \end{table}
 
-\section*{Current Results}
+\section*{Simulator}
+
+All reported quantized accuracies use the fixed simulator on CIFAR-100 RGGB
+with \texttt{raw\_noise=True} (50k train / 10k test).
+The dense int4 path uses unsigned I16 first-layer input codes in $[0,65535]$,
+integer W4/LUT weights, unsigned A4 hidden activations in $[0,15]$, int32
+convolution, and precomputed requantization.  BatchNorm is folded before
+simulator execution. Runtime forward does not run \texttt{tanh}, k-means,
+nearest-LUT search, or weight quantization.
+
+Current LUT: 15 integer entries,
+$[-14,-12,-10,-8,-6,-4,-2,0,2,4,6,8,10,12,14]$ with $m=15$.
+
+\section*{QKD Results}
 
 \begin{table}[h]
 \centering
 \small
-\begin{tabularx}{\linewidth}{@{}l l l r X@{}}
+\begin{tabularx}{\linewidth}{@{}l l r r X@{}}
 \toprule
-Experiment & Precision & Eval path & Acc. (\%) & Notes \\
+Stage & Checkpoint & Train best (\%) & Simulator (\%) & Notes \\
 \midrule
-RGB FP32 reference & FP32 & float & \pending & Legacy RGB result should be rerun if needed for a strict comparison. \\
-RAW/RGGB FP32 & FP32 & float & 61.31 & Default noisy test sanity check; training-log best is 61.44. \\
-RAW/RGGB FP32 & FP32 & float & 61.18 & Clean test, \texttt{raw\_noise=False}. \\
-RAW/RGGB QAT & W4A4 uniform & INT simulator & 56.61 & Current validated noisy simulator baseline. \\
-RAW/RGGB QAT & W4A4 uniform & INT simulator & 57.09 & Clean simulator reference from previous run. \\
-QKD uniform, first pass & W4A4 uniform & INT simulator & 56.02 & Worse than QAT; not accepted as final QKD. \\
-QKD uniform, matched schedule & W4A4 uniform & INT simulator & 56.93 & Partial CS rerun best; archived because it did not beat the non-uniform path. \\
-QKD non-uniform SS & W4A4 integer LUT-Q, $m=7$ & codebook INT simulator & 56.78 & Integer LUT values $[-7,\ldots,7]$. \\
-QKD non-uniform SS & W4A4 integer LUT-Q, $m=15$ & codebook INT simulator & 56.52 & Integer LUT values $[-14,-12,\ldots,14]$; training-log best 57.06. \\
-QKD non-uniform SS + PACT & I16/W4/A4 integer LUT-Q, $m=15$ & codebook INT simulator & 60.21 & Current best; training-log best 60.66. \\
-QKD non-uniform TU + DKD & I16/W4/A4 integer LUT-Q, $m=15$ & codebook INT simulator & 60.20 & Initial checkpoint remained best; TU did not improve over SS. \\
+SS & \texttt{...\_lutq\_ss.pth} & 60.66 & 60.21 & Self-studying, I16/W4/A4 LUT-Q + PACT. \\
+CS & \texttt{...\_lutq\_cs.pth} & 61.39 & 61.24 & Co-studying; improvement appeared after LR drop. \\
+TU & \texttt{...\_lutq\_tu.pth} & 61.81 & \textbf{61.66} & Tutoring; best current int4 simulator result. \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\section*{QKD Setup}
+\section*{PIM Conv Status}
 
-The teacher checkpoint \texttt{b4\_100.pth} uses 4-channel RAW/RGGB input, not
-RGB input.  Teacher preprocessing upsamples RGGB tensors to $224\times224$ and
-normalizes with $(x-0.5)/0.5$.
+Implemented an explicit PIM-QAT model path and PIM simulator path without
+changing the default dense-QKD path.  The current minimal PIM path keeps the
+existing BN student model; GBN/PCN are not enabled in this pass.  The PIM path follows
+\texttt{pim\_info/scanpcn\_inference\_spec.tex}: row select over
+$[18,18,36,72]$ chunks, keep 48 of 144 rows by default, hybrid stage1.1 keep
+72 of 144 rows, 7-bit mid-rise tile ADC, digital BN scale/bias, normalized
+hidden DAC activations in $[0,1]$, and unmasked stage1.0 / logits layers.
+PIM-QAT eval and PIM simulator are numerically matched on the TU checkpoint
+smoke input (\texttt{max\_abs\_diff} $\le 6\times10^{-7}$).
+PIM-specific training is the next experiment
+and is kept separate from the dense int4 QKD results above.
 
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{@{}l r l@{}}
-\toprule
-Teacher / stage & Acc. (\%) & Notes \\
-\midrule
-EfficientNetV2-L teacher, clean & 77.30 & Verified on current H5 test split. \\
-EfficientNetV2-L teacher, noisy & 77.33 & Default noisy evaluation. \\
-Co-studied teacher, noisy & 78.70 & Short CS run improved teacher. \\
-QKD SS first pass & 56.11 & Uniform W4A4 student, noisy test. \\
-QKD TU attempts & 60.20 & Best TU simulator result so far; did not improve over the I16 SS checkpoint. \\
-\bottomrule
-\end{tabular}
-\end{table}
+\section*{Current Best}
 
-\section*{Integer Simulator}
-
-The simulator is the reporting path for quantized inference.  It runs on CPU
-because PyTorch does not provide the exact CUDA int4/int32 convolution kernel
-we need here.
-
-\begin{itemize}
-  \item The first layer input uses unsigned 16-bit input codes in $[0,65535]$.
-  \item Hidden activations use unsigned 4-bit activation codes in $[0,15]$.
-  \item Uniform weights use signed 4-bit codes in $[-7,7]$ plus per-output-channel scales.
-  \item Non-uniform weights use 4-bit indices into an integer LUT-Q codebook; the current best checkpoint uses integer LUT values $[-14,-12,\ldots,14]$.
-  \item Convolution uses int32 accumulation.
-  \item Requantization uses precomputed layer constants derived from activation and weight scales.
-  \item BatchNorm is folded into convolution weights/bias before simulator execution.
-  \item Weight-side QAT transforms are exported offline into integer weight codes and scales.  Simulator forward does not run \texttt{tanh}, k-means, nearest-LUT search, or weight quantization.
-  \item Final logits are dequantized to FP32 after the final integer convolution and then globally averaged.
-\end{itemize}
-
-For the current uniform QAT checkpoint, fake-quant and simulator agree under
-the same deterministic loader settings:
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{@{}l r r@{}}
-\toprule
-Setting & Fake QAT (\%) & INT simulator (\%) \\
-\midrule
-Noisy, \texttt{raw\_noise=True}, \texttt{num\_workers=0} & 56.61 & 56.61 \\
-Clean, \texttt{raw\_noise=False}, \texttt{num\_workers=0} & 57.09 & 57.09 \\
-Non-uniform SS, integer LUT-Q $m=7$, noisy & 56.78 & 56.78 \\
-Non-uniform SS, integer LUT-Q $m=15$, noisy & 56.52 & 56.52 \\
-Non-uniform SS + PACT, integer LUT-Q $m=15$, I16 input, noisy & -- & 60.21 \\
-Non-uniform TU + DKD, integer LUT-Q $m=15$, I16 input, noisy & -- & 60.20 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\section*{Next Updates}
-
-\begin{enumerate}
-  \item Investigate why TU/DKD does not improve over the I16 SS checkpoint.
-  \item Keep simulator reporting on the precomputed integer path with \texttt{raw\_noise=True}.
-  \item Add hardware constraints once the PIM-side requirements are finalized.
-\end{enumerate}
+\texttt{checkpoints/rerun/qkd\_i16\_intlut\_pact\_g8m15\_lutq\_tu.pth}
 
 \end{document}

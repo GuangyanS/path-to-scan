@@ -271,6 +271,129 @@ def lutq_fake_quant_weight_4bit(weight, codebook, group_size):
     return weight + (quantized - weight).detach()
 
 
+def _lutq_weight_norm_scale(weight, codebook, group_size):
+    group_size = _weight_group_size(weight, group_size)
+    weight_tanh = torch.tanh(weight)
+    chunks = []
+    scales = torch.empty(
+        weight.shape[0], 1, 1, 1, device=weight.device, dtype=weight.dtype)
+    values = codebook.codebook_normalized.to(
+        device=weight.device, dtype=weight.dtype)
+    for start in range(0, weight_tanh.shape[0], group_size):
+        end = min(start + group_size, weight_tanh.shape[0])
+        group = weight_tanh[start:end]
+        scale = torch.clamp(group.detach().abs().amax(), min=1e-8)
+        normalized = torch.clamp(group / scale, -1.0, 1.0)
+        dists = (normalized.reshape(-1).unsqueeze(-1) - values.unsqueeze(0)).abs()
+        idx = dists.argmin(dim=-1)
+        quantized = values[idx].reshape_as(group)
+        chunks.append(normalized + (quantized - normalized).detach())
+        scales[start:end] = scale
+    return torch.cat(chunks, dim=0), scales
+
+
+def _uniform_weight_norm_scale(weight):
+    qmax = 7.0
+    scale = torch.clamp(
+        weight.detach().abs().amax(dim=(1, 2, 3), keepdim=True) / qmax,
+        min=1e-8)
+    normalized = torch.clamp(weight / scale, -qmax, qmax)
+    quantized = torch.clamp(torch.round(normalized), -qmax, qmax) / qmax
+    return normalized / qmax + (quantized - normalized / qmax).detach(), scale * qmax
+
+
+def _pim_chunk_spec(num_rows, keep_rows):
+    keep_rows = int(keep_rows)
+    if num_rows == 144:
+        chunks = [18, 18, 36, 72]
+        if keep_rows == 72:
+            return chunks, [9, 9, 18, 36]
+        if keep_rows == 48:
+            return chunks, [6, 6, 12, 24]
+        quotas = [max(0, int(round(keep_rows * c / 144.0))) for c in chunks]
+        diff = keep_rows - sum(quotas)
+        quotas[-1] += diff
+        return chunks, quotas
+    keep = max(1, min(num_rows, int(round(num_rows / 3.0))))
+    return [num_rows], [keep]
+
+
+def _pim_row_mask(codes, keep_rows):
+    masks = []
+    start = 0
+    for chunk, quota in zip(*_pim_chunk_spec(codes.shape[1], keep_rows)):
+        quota = max(0, min(int(quota), int(chunk)))
+        part = codes[:, start:start + chunk]
+        if quota == 0:
+            masks.append(torch.zeros_like(part, dtype=torch.bool))
+            start += chunk
+            continue
+        n = part.shape[1]
+        rank = torch.arange(
+            n - 1, -1, -1, device=part.device, dtype=part.dtype).view(1, n, 1)
+        tier = (part >= 4).to(part.dtype)
+        nz = (part >= 1).to(part.dtype)
+        score = tier * (2 * n + 2) + nz * (n + 1) + rank
+        top = score.topk(quota, dim=1).indices
+        mask = torch.zeros_like(part, dtype=torch.bool)
+        mask.scatter_(1, top, True)
+        masks.append(mask)
+        start += chunk
+    return torch.cat(masks, dim=1)
+
+
+def _pim_midrise_adc(x, keep_rows, adc_bits, noise_sigma=0.0):
+    n_codes = float(2 ** int(adc_bits))
+    window = float(keep_rows)
+    delta = 2.0 * window / n_codes
+    code = torch.floor((torch.clamp(x, -window, window) + window) / delta)
+    code = torch.clamp(code, 0.0, n_codes - 1.0)
+    quantized = -window + (code + 0.5) * delta
+    if noise_sigma > 0:
+        quantized = quantized + float(noise_sigma) * delta * torch.randn_like(quantized)
+    return x + (quantized - x).detach()
+
+
+def _pim_quantize_unit_activation(x, bits=4):
+    qmax = float(2 ** int(bits) - 1)
+    clipped = torch.clamp(x, 0.0, 1.0)
+    quantized = torch.round(clipped * qmax) / qmax
+    return x + (quantized - x).detach()
+
+
+def _pim_masked_conv2d(x, qweight_norm, weight_scale, conv, keep_rows,
+                       adc_bits, noise_sigma):
+    k_h, k_w = conv.kernel_size
+    stride = conv.stride
+    padding = conv.padding
+    unit_channels = max(1, 144 // (k_h * k_w))
+    patches = F.unfold(x, (k_h, k_w), padding=padding, stride=stride)
+    batch = patches.shape[0]
+    height = (x.shape[-2] + 2 * padding[0] - k_h) // stride[0] + 1
+    width = (x.shape[-1] + 2 * padding[1] - k_w) // stride[1] + 1
+    codes = torch.round(torch.clamp(patches, 0.0, 1.0) * 15.0)
+    drive = patches + (codes / 15.0 - patches).detach()
+
+    output = None
+    for start in range(0, conv.in_channels, unit_channels):
+        end = min(start + unit_channels, conv.in_channels)
+        row_start = start * k_h * k_w
+        row_end = end * k_h * k_w
+        tile = drive[:, row_start:row_end]
+        tile_codes = codes[:, row_start:row_end]
+        keep = keep_rows if tile.shape[1] == 144 else max(
+            1, int(round(tile.shape[1] / 3.0)))
+        mask = _pim_row_mask(tile_codes, keep).to(tile.dtype)
+        tile = tile * mask
+        weight = qweight_norm[:, start:end].reshape(qweight_norm.shape[0], -1)
+        partial = torch.einsum('on,bnl->bol', weight, tile)
+        partial = _pim_midrise_adc(partial, keep, adc_bits, noise_sigma)
+        output = partial if output is None else output + partial
+
+    output = output * weight_scale.view(1, -1, 1)
+    return output.reshape(batch, qweight_norm.shape[0], height, width)
+
+
 class ActivationFakeQuant4Bit(nn.Module):
     def __init__(self, momentum=0.1):
         super().__init__()
@@ -299,6 +422,11 @@ class ActivationFakeQuant4Bit(nn.Module):
         scale = amax / qmax
         quantized = torch.clamp(torch.round(x / scale), 0.0, qmax) * scale
         return x + (quantized - x).detach()
+
+
+class NormalizedActivationFakeQuant4Bit(nn.Module):
+    def forward(self, x):
+        return _pim_quantize_unit_activation(x, 4)
 
 
 class _PACTClamp(torch.autograd.Function):
@@ -335,6 +463,28 @@ class PACTActivationFakeQuant4Bit(nn.Module):
         scale = alpha / qmax
         quantized = torch.clamp(torch.round(x_clip / scale), 0.0, qmax) * scale
         return x_clip + (quantized - x_clip).detach()
+
+
+class NormalizedPACTActivationFakeQuant4Bit(nn.Module):
+    """PACT output normalized to the PIM DAC domain [0, 1]."""
+
+    def __init__(self, init_alpha=6.0):
+        super().__init__()
+        target = torch.tensor(max(float(init_alpha) - 1e-3, 1e-6))
+        raw_alpha = torch.log(torch.expm1(target))
+        self.alpha = nn.Parameter(raw_alpha)
+
+    @property
+    def amax(self):
+        return F.softplus(self.alpha) + 1e-3
+
+    def forward(self, x):
+        qmax = 15.0
+        alpha = self.amax
+        x_clip = _PACTClamp.apply(x, alpha)
+        normalized = x_clip / torch.clamp(alpha.detach(), min=1e-8)
+        quantized = torch.clamp(torch.round(normalized * qmax), 0.0, qmax) / qmax
+        return normalized + (quantized - normalized).detach()
 
 
 class QuantConv2d4Bit(nn.Conv2d):
@@ -440,6 +590,89 @@ class ALL_CNN_C_QAT(BasicModule):
         x = self.act7(F.relu(self.bn7(self._conv(self.conv7, x))))
         x = self.act8(F.relu(self.bn8(self._conv(self.conv8, x))))
         x = self._conv(self.conv9, x)
+
+        x = self.avg(x)
+        return torch.flatten(x, 1)
+
+
+class ALL_CNN_C_PIM_QAT(ALL_CNN_C_QAT):
+    """PIM-aware QAT model aligned with scanpcn_inference_spec.tex.
+
+    Hidden activations are normalized 4-bit DAC values in [0, 1]. Masked
+    layers use row selection plus a 7-bit mid-rise tile ADC in the forward
+    pass. stage1.0 and stage3.2 stay unmasked, matching the spec's open item.
+    """
+
+    def __init__(self, num_classes=100, in_channels=4,
+                 use_lutq=True, lutq_group_size=8, lutq_int_max=7,
+                 use_pact=True, pact_alpha=6.0, input_bits=16,
+                 pim_adc_bits=7, pim_keep=48, pim_stage11_keep=72,
+                 pim_noise_sigma=0.0):
+        super(ALL_CNN_C_PIM_QAT, self).__init__(
+            num_classes=num_classes, in_channels=in_channels,
+            use_lutq=use_lutq, lutq_group_size=lutq_group_size,
+            lutq_int_max=lutq_int_max, use_pact=use_pact,
+            pact_alpha=pact_alpha, input_bits=input_bits)
+        self.model_name = 'ALL_CNN_C_PIM_QAT'
+        self.pim_normalized_activations = True
+        self.pim_adc_bits = int(pim_adc_bits)
+        self.pim_keep = int(pim_keep)
+        self.pim_stage11_keep = int(pim_stage11_keep)
+        self.pim_noise_sigma = float(pim_noise_sigma)
+
+        act_cls = (lambda: NormalizedPACTActivationFakeQuant4Bit(self.pact_alpha)
+                   if self.use_pact else NormalizedActivationFakeQuant4Bit())
+        self.act1 = act_cls()
+        self.act2 = act_cls()
+        self.act3 = act_cls()
+        self.act4 = act_cls()
+        self.act5 = act_cls()
+        self.act6 = act_cls()
+        self.act7 = act_cls()
+        self.act8 = act_cls()
+
+    def _weight_norm_scale(self, conv):
+        if self.use_lutq:
+            return _lutq_weight_norm_scale(
+                conv.weight, self.lutq_codebook, self.lutq_group_size)
+        return _uniform_weight_norm_scale(conv.weight)
+
+    def _pim_conv(self, conv, x, masked=True, keep_rows=None):
+        qweight_norm, weight_scale = self._weight_norm_scale(conv)
+        if masked:
+            return _pim_masked_conv2d(
+                x, qweight_norm, weight_scale, conv,
+                keep_rows if keep_rows is not None else self.pim_keep,
+                self.pim_adc_bits, self.pim_noise_sigma)
+        weight = qweight_norm * weight_scale
+        return F.conv2d(
+            x, weight, conv.bias, conv.stride, conv.padding,
+            conv.dilation, conv.groups)
+
+    def _input_quant(self, x):
+        if self.input_bits > 4:
+            qmax = float(2 ** self.input_bits - 1)
+            quantized = torch.clamp(torch.round(x * qmax), 0.0, qmax) / qmax
+            return x + (quantized - x).detach()
+        return _pim_quantize_unit_activation(x, self.input_bits)
+
+    def forward(self, x):
+        x = self._input_quant(x)
+
+        x = self.act1(F.relu(self.bn1(self._pim_conv(self.conv1, x, masked=False))))
+        x = self.act2(F.relu(self.bn2(self._pim_conv(
+            self.conv2, x, masked=True, keep_rows=self.pim_stage11_keep))))
+        x = self.act3(F.relu(self.bn3(self._pim_conv(self.conv3, x))))
+        x = self.dp1(x)
+
+        x = self.act4(F.relu(self.bn4(self._pim_conv(self.conv4, x))))
+        x = self.act5(F.relu(self.bn5(self._pim_conv(self.conv5, x))))
+        x = self.act6(F.relu(self.bn6(self._pim_conv(self.conv6, x))))
+        x = self.dp2(x)
+
+        x = self.act7(F.relu(self.bn7(self._pim_conv(self.conv7, x))))
+        x = self.act8(F.relu(self.bn8(self._pim_conv(self.conv8, x))))
+        x = self._pim_conv(self.conv9, x, masked=False)
 
         x = self.avg(x)
         return torch.flatten(x, 1)

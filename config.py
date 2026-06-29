@@ -27,6 +27,11 @@ class DefaultConfig(object):
     use_pact = False
     pact_alpha = 6.0
     qkd_cache_teacher_logits = False
+    pim_qat = False
+    pim_adc_bits = 7
+    pim_keep = 48
+    pim_stage11_keep = 72
+    pim_noise_sigma = 0.0
 
     test_model_path = './checkpoints/'
     use_trained_model = False
@@ -39,6 +44,7 @@ class DefaultConfig(object):
     milestones = '100,150'
     warmup = 5
     eval_every = 1
+    max_eval_batches = None
 
 
 # config of training 1

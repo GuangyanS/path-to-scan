@@ -12,7 +12,7 @@ from config import opt
 from h5_dataset import RawH5CIFARDataset
 import models
 import qkd
-from simulator import ALLCNNInt4Simulator
+from simulator import ALLCNNInt4Simulator, ALLCNNPIMSimulator
 
 
 def set_seed(seed):
@@ -31,13 +31,15 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 
-def check_acc(loader, model, device, name='test'):
+def check_acc(loader, model, device, name='test', max_batches=None):
     print('* * *  Checking accuracy on %s set' % name)
     num_correct = 0
     num_samples = 0
     model.eval()  # set model to evaluation mode
     with torch.no_grad():
-        for x, y in loader:
+        for batch_idx, (x, y) in enumerate(loader):
+            if max_batches is not None and batch_idx >= int(max_batches):
+                break
             x = x.to(device=device, dtype=torch.float32)  # move to device, e.g. GPU
             y = y.to(device=device, dtype=torch.long)
             scores = model(x)
@@ -297,11 +299,20 @@ def qkd_stage_save_name(stage):
 
 
 def make_qat_model():
-    return models.ALL_CNN_C_QAT(
+    cls = models.ALL_CNN_C_PIM_QAT if opt.pim_qat else models.ALL_CNN_C_QAT
+    extra = {}
+    if opt.pim_qat:
+        extra = {
+            'pim_adc_bits': opt.pim_adc_bits,
+            'pim_keep': opt.pim_keep,
+            'pim_stage11_keep': opt.pim_stage11_keep,
+            'pim_noise_sigma': opt.pim_noise_sigma,
+        }
+    return cls(
         num_classes=opt.num_classes, in_channels=opt.input_channels,
         use_lutq=opt.qkd_use_lutq, lutq_group_size=opt.lutq_group_size,
         lutq_int_max=opt.lutq_int_max, use_pact=opt.use_pact,
-        pact_alpha=opt.pact_alpha, input_bits=opt.input_bits)
+        pact_alpha=opt.pact_alpha, input_bits=opt.input_bits, **extra)
 
 
 def update_lutq_codebook(model):
@@ -577,6 +588,28 @@ def int4_sim_test(**kwargs):
     print('integer simulator code ranges:', model.code_ranges())
     check_acc(loader_test, model, torch.device('cpu'),
               name='int4 simulator test')
+
+
+def pim_sim_test(**kwargs):
+    opt.parse(kwargs)
+    set_seed(opt.seed)
+    if opt.disable_cudnn:
+        torch.backends.cudnn.enabled = False
+
+    _, loader_test = build_h5_loaders()
+
+    qat_model = make_qat_model()
+    cp_name = opt.checkpoint_load_name or opt.qat_checkpoint_save_name
+    load_qat_checkpoint(qat_model, cp_name)
+    qat_model.eval()
+
+    model = ALLCNNPIMSimulator(
+        qat_model, adc_bits=opt.pim_adc_bits, keep_rows=opt.pim_keep,
+        stage11_keep_rows=opt.pim_stage11_keep,
+        noise_sigma=opt.pim_noise_sigma).cpu()
+    print('PIM simulator code ranges:', model.code_ranges())
+    check_acc(loader_test, model, torch.device('cpu'),
+              name='PIM simulator test', max_batches=opt.max_eval_batches)
 
 
 def teacher_test(**kwargs):
