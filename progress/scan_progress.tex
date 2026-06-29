@@ -28,33 +28,6 @@
 \begin{document}
 \maketitle
 
-\section*{Scope}
-
-This note tracks the current CIFAR-100 path from RGB/FP32 references to
-RAW-RGGB training, 4W4A quantization, QKD, and the first PIM-conv simulator
-path. Unless stated otherwise, reported test accuracy uses the default RAW
-noise setting \texttt{raw\_noise=True}. Quantized results should be reported
-from the integer simulator, not from fake-quant training metrics.
-
-\section*{Pipeline Summary}
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabularx}{\linewidth}{@{}l l l l X@{}}
-\toprule
-Stage & Input & Model & Inference path & Current status \\
-\midrule
-RGB FP32 & RGB CIFAR-100 & legacy FP32 CNN & floating point & Legacy reference only; rerun not yet in this repo. \\
-RAW/RGGB FP32 & 4-channel RGGB & ALL-CNN-C + BN & floating point & Current reproducible baseline. \\
-RAW/RGGB W4A4 & 4-channel RGGB & ALL-CNN-C QAT & INT simulator & Uniform W4A4 baseline validated. \\
-QKD uniform & 4-channel RGGB & QAT student + EfficientNetV2-L teacher & INT simulator & Matched-schedule partial rerun was below the non-uniform path. \\
-QKD non-uniform & 4-channel RGGB & QAT + integer LUT-Q + PACT & codebook INT simulator & Current best validated dense int4 checkpoint. \\
-PIM conv & 4-channel RGGB & PIM-QAT student & PIM simulator & Simulator path implemented; PIM-specific training is next. \\
-\bottomrule
-\end{tabularx}
-\end{table}
-
 \section*{Student Network}
 
 The current student network uses 4-channel RGGB input at spatial size
