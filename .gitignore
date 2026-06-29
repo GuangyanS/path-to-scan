@@ -12,6 +12,7 @@ checkpoints/*
 !checkpoints/.gitkeep
 !checkpoints/ALL_CNN_C_c100_rggb_h5_bn_refstyle.pth
 !checkpoints/ALL_CNN_C_c100_rggb_h5_w4a4_qat.pth
+!checkpoints/ALL_CNN_C_c100_rgb_aug_bn_refstyle.pth
 
 datasets/*
 !datasets/.gitkeep
@@ -20,3 +21,4 @@ datasets/*
 *.tar.gz
 !checkpoints/ALL_CNN_C_c100_rggb_h5_bn_refstyle.pth
 !checkpoints/ALL_CNN_C_c100_rggb_h5_w4a4_qat.pth
+!checkpoints/ALL_CNN_C_c100_rgb_aug_bn_refstyle.pth

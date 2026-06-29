@@ -37,6 +37,8 @@ class DefaultConfig(object):
     use_trained_model = False
 
     h5_path = './datasets/cifar100_raw.h5'
+    dataset = 'raw_h5'
+    cifar100_path = './datasets/cifar-100-python'
     raw_augment = True
     raw_noise = True
 

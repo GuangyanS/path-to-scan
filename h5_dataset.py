@@ -113,3 +113,44 @@ class RawH5CIFARDataset(Dataset):
         if self.return_index:
             return raw, label, torch.tensor(idx, dtype=torch.long)
         return raw, label
+
+
+class CIFAR100PythonDataset(Dataset):
+    """Read the standard CIFAR-100 python-format files without torchvision."""
+
+    def __init__(self, root, train, augment=False, return_index=False):
+        import os
+        import pickle
+
+        split_name = 'train' if train else 'test'
+        path = os.path.join(str(root), split_name)
+        with open(path, 'rb') as f:
+            data = pickle.load(f, encoding='latin1')
+
+        self.images = data['data'].reshape(-1, 3, 32, 32)
+        self.labels = np.asarray(data['fine_labels'], dtype=np.int64)
+        self.augment = augment
+        self.return_index = return_index
+        self.image_shape = (3, 32, 32)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def _augment(self, x):
+        crop_h, crop_w = self.image_shape[1], self.image_shape[2]
+        if torch.rand(()) < 0.5:
+            x = torch.flip(x, dims=[2])
+        x = F.pad(x, (4, 4, 4, 4), mode='reflect')
+        _, h, w = x.shape
+        top = torch.randint(0, h - crop_h + 1, ()).item()
+        left = torch.randint(0, w - crop_w + 1, ()).item()
+        return x[:, top:top + crop_h, left:left + crop_w]
+
+    def __getitem__(self, idx):
+        image = torch.from_numpy(self.images[idx]).float() / 255.0
+        if self.augment:
+            image = self._augment(image)
+        label = torch.tensor(int(self.labels[idx]), dtype=torch.long)
+        if self.return_index:
+            return image, label, torch.tensor(idx, dtype=torch.long)
+        return image, label

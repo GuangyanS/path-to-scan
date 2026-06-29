@@ -111,7 +111,8 @@
 \toprule
 Phase & Experiment & Precision / path & Acc. (\%) & Notes \\
 \midrule
-1 & RGB AllCNN-C & FP32 float & 60.50 & \texttt{checkpoints/archive/ALL\_CNN\_C\_c100\_noaug.pth}; conv1 is 3-channel RGB. \\
+1 & RGB AllCNN-C, current recipe & FP32 float & 72.99 & Standard CIFAR-100 RGB, $3\times32\times32$, crop/flip augmentation; \texttt{checkpoints/ALL\_CNN\_C\_c100\_rgb\_aug\_bn\_refstyle.pth}. \\
+1 & RGB AllCNN-C, historical & FP32 float & 60.50 & \texttt{checkpoints/archive/ALL\_CNN\_C\_c100\_noaug.pth}; no-augmentation checkpoint, not an apples-to-apples current baseline. \\
 1 & RAW/RGGB AllCNN-C & FP32 float & 61.31 & Current 4-channel RGGB BN baseline, \texttt{raw\_noise=True}. \\
 1 & RAW/RGGB AllCNN-C & FP32 float & 61.18 & Clean test, \texttt{raw\_noise=False}. \\
 2 & RAW/RGGB W4A4 & uniform W4A4 INT sim & 56.61 & Validated noisy simulator baseline. \\

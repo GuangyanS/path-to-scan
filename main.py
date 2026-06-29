@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import opt
-from h5_dataset import RawH5CIFARDataset
+from h5_dataset import CIFAR100PythonDataset, RawH5CIFARDataset
 import models
 import qkd
 from simulator import ALLCNNInt4Simulator, ALLCNNPIMSimulator
@@ -52,12 +52,19 @@ def check_acc(loader, model, device, name='test', max_batches=None):
 
 
 def build_h5_loaders(return_index=False):
-    train_set = RawH5CIFARDataset(
-        opt.h5_path, train=True, augment=opt.raw_augment,
-        noise=opt.raw_noise, return_index=return_index)
-    test_set = RawH5CIFARDataset(
-        opt.h5_path, train=False, augment=False,
-        noise=opt.raw_noise)
+    if opt.dataset == 'cifar100_rgb':
+        train_set = CIFAR100PythonDataset(
+            opt.cifar100_path, train=True, augment=opt.raw_augment,
+            return_index=return_index)
+        test_set = CIFAR100PythonDataset(
+            opt.cifar100_path, train=False, augment=False)
+    else:
+        train_set = RawH5CIFARDataset(
+            opt.h5_path, train=True, augment=opt.raw_augment,
+            noise=opt.raw_noise, return_index=return_index)
+        test_set = RawH5CIFARDataset(
+            opt.h5_path, train=False, augment=False,
+            noise=opt.raw_noise)
     generator = torch.Generator()
     generator.manual_seed(opt.seed)
     persistent_workers = opt.num_workers > 0
