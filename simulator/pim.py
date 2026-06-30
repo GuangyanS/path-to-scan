@@ -65,6 +65,20 @@ def _midrise_adc(x, keep_rows, adc_bits, noise_sigma=0.0):
     return quantized
 
 
+def _paper_pim_quantize(x, adc_bits, n_macs, w_bits=4, a_bits=4,
+                        dac_bits=1, noise_sigma=0.0):
+    delta = 2 ** int(dac_bits)
+    pim_levels = 2 ** int(adc_bits) - 1
+    w_levels = 2 ** (int(w_bits) - 1) - 1
+    a_levels = 2 ** int(a_bits) - 1
+    scale = pim_levels * w_levels * a_levels / (
+        float(n_macs) * float(delta - 1))
+    quantized = torch.round(x * scale) / scale
+    if noise_sigma > 0:
+        quantized = quantized + float(noise_sigma) / scale * torch.randn_like(quantized)
+    return quantized
+
+
 def _conv_output_hw(x, conv):
     k_h, k_w = conv.kernel_size
     s_h, s_w = conv.stride
@@ -187,10 +201,51 @@ class PIMConvRequant(nn.Module):
         output = output.reshape(batch, self.qweight.shape[0], out_h, out_w)
         return output * self.post_scale.view(1, -1, 1, 1) + self.post_bias.view(1, -1, 1, 1)
 
+    def _paper_bitserial_conv(self, x_code):
+        w_bits = 4
+        a_bits = 4
+        dac_bits = 1
+        n_macs = 144
+        delta = 2 ** dac_bits
+        w_levels = 2 ** (w_bits - 1) - 1
+        a_levels = 2 ** a_bits - 1
+        mask = (1 << w_bits) - 1
+        w_int = self.qweight.to(torch.int64)
+        w_2c = w_int & mask
+        a_int = torch.round(
+            torch.clamp(x_code.to(torch.float32) * self.input_scale, 0.0, 1.0)
+            * a_levels).to(torch.int64)
+        output = None
+
+        for start in range(0, self.in_channels, self.unit_channels):
+            end = min(start + self.unit_channels, self.in_channels)
+            partial_sum = None
+            for k in range(w_bits):
+                w_bit = ((w_2c[:, start:end] >> k) & 1).to(torch.float32)
+                w_slice = w_bit / float(w_levels)
+                sign = -1.0 if k == (w_bits - 1) else 1.0
+                for bit in range(a_bits // dac_bits):
+                    a_slice = ((a_int[:, start:end] >> (bit * dac_bits))
+                               & (delta - 1)).to(torch.float32) / float(a_levels)
+                    partial = F.conv2d(
+                        a_slice, w_slice, None, self.stride, self.padding)
+                    partial = _paper_pim_quantize(
+                        partial, self.adc_bits, n_macs, w_bits, a_bits,
+                        dac_bits, self.noise_sigma)
+                    contrib = sign * (2 ** k) * (delta ** bit) * partial
+                    partial_sum = contrib if partial_sum is None else partial_sum + contrib
+            output = partial_sum if output is None else output + partial_sum
+
+        output = output * 1.03
+        return output * self.post_scale.view(1, -1, 1, 1) + self.post_bias.view(1, -1, 1, 1)
+
     def forward(self, x_code):
         if x_code.device.type != 'cpu':
             raise RuntimeError('PIM simulator runs on CPU; move inputs/model to CPU.')
-        y = self._masked_conv(x_code) if self.masked else self._dense_conv(x_code)
+        if self.masked and self.keep_rows >= 144:
+            y = self._paper_bitserial_conv(x_code)
+        else:
+            y = self._masked_conv(x_code) if self.masked else self._dense_conv(x_code)
         q = torch.round(torch.clamp(y / self.requant_scale, 0.0, 15.0))
         return q.to(torch.int32)
 

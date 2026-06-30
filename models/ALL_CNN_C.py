@@ -354,6 +354,77 @@ def _pim_midrise_adc(x, keep_rows, adc_bits, noise_sigma=0.0):
     return x + (quantized - x).detach()
 
 
+def _compute_gste_xi(y_pim, y_digital, eps=1e-12):
+    var_pim = y_pim.detach().var().clamp(min=eps)
+    var_digital = y_digital.detach().var().clamp(min=eps)
+    return (var_pim / var_digital).sqrt().clamp(0.1, 10.0)
+
+
+class _GSTEFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, digital_out, pim_out, xi):
+        ctx.save_for_backward(xi.view(1) if xi.dim() == 0 else xi)
+        return pim_out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (xi,) = ctx.saved_tensors
+        return grad_output * xi, None, None
+
+
+def _pim_paper_quantize(x, adc_bits, n_macs, w_bits=4, a_bits=4,
+                        dac_bits=1, noise_sigma=0.0):
+    delta = 2 ** int(dac_bits)
+    pim_levels = 2 ** int(adc_bits) - 1
+    w_levels = 2 ** (int(w_bits) - 1) - 1
+    a_levels = 2 ** int(a_bits) - 1
+    scale = pim_levels * w_levels * a_levels / (
+        float(n_macs) * float(delta - 1))
+    quantized = torch.round(x * scale) / scale
+    if noise_sigma > 0:
+        quantized = quantized + float(noise_sigma) / scale * torch.randn_like(quantized)
+    return quantized
+
+
+def _pim_bitserial_conv2d(x, qweight_norm, weight_scale, conv, n_macs,
+                          adc_bits, noise_sigma, forward_scale=1.03):
+    w_bits = 4
+    a_bits = 4
+    dac_bits = 1
+    unit_channels = max(1, int(n_macs) // (conv.kernel_size[0] * conv.kernel_size[1]))
+    w_levels = 2 ** (w_bits - 1) - 1
+    a_levels = 2 ** a_bits - 1
+    delta = 2 ** dac_bits
+    mask = (1 << w_bits) - 1
+    w_int = torch.round(qweight_norm * w_levels).long()
+    w_2c = w_int & mask
+    a_int = torch.round(torch.clamp(x, 0.0, 1.0) * a_levels).long()
+    output = None
+
+    for start in range(0, conv.in_channels, unit_channels):
+        end = min(start + unit_channels, conv.in_channels)
+        partial_sum = None
+        for k in range(w_bits):
+            w_bit = ((w_2c[:, start:end] >> k) & 1).to(dtype=x.dtype)
+            w_slice = w_bit / float(w_levels)
+            sign = -1.0 if k == (w_bits - 1) else 1.0
+            for bit in range(a_bits // dac_bits):
+                a_slice = ((a_int[:, start:end] >> (bit * dac_bits))
+                           & (delta - 1)).to(dtype=x.dtype) / float(a_levels)
+                partial = F.conv2d(
+                    a_slice, w_slice, None, conv.stride, conv.padding,
+                    conv.dilation, conv.groups)
+                partial = _pim_paper_quantize(
+                    partial, adc_bits, n_macs, w_bits, a_bits, dac_bits,
+                    noise_sigma)
+                contrib = sign * (2 ** k) * (delta ** bit) * partial
+                partial_sum = contrib if partial_sum is None else partial_sum + contrib
+        output = partial_sum if output is None else output + partial_sum
+
+    output = output * float(forward_scale)
+    return output * weight_scale.view(1, -1, 1, 1)
+
+
 def _pim_quantize_unit_activation(x, bits=4):
     qmax = float(2 ** int(bits) - 1)
     clipped = torch.clamp(x, 0.0, 1.0)
@@ -640,10 +711,24 @@ class ALL_CNN_C_PIM_QAT(ALL_CNN_C_QAT):
     def _pim_conv(self, conv, x, masked=True, keep_rows=None):
         qweight_norm, weight_scale = self._weight_norm_scale(conv)
         if masked:
+            keep = keep_rows if keep_rows is not None else self.pim_keep
+            if keep >= 144:
+                digital = F.conv2d(
+                    x, qweight_norm * weight_scale, conv.bias, conv.stride,
+                    conv.padding, conv.dilation, conv.groups)
+                with torch.no_grad():
+                    pim = _pim_bitserial_conv2d(
+                        x, qweight_norm, weight_scale, conv, 144,
+                        self.pim_adc_bits, self.pim_noise_sigma)
+                    if conv.bias is not None:
+                        pim = pim + conv.bias.view(1, -1, 1, 1)
+                    xi = _compute_gste_xi(pim, digital)
+                if self.training:
+                    return _GSTEFunction.apply(digital, pim, xi)
+                return pim
             return _pim_masked_conv2d(
                 x, qweight_norm, weight_scale, conv,
-                keep_rows if keep_rows is not None else self.pim_keep,
-                self.pim_adc_bits, self.pim_noise_sigma)
+                keep, self.pim_adc_bits, self.pim_noise_sigma)
         weight = qweight_norm * weight_scale
         return F.conv2d(
             x, weight, conv.bias, conv.stride, conv.padding,

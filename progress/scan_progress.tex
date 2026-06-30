@@ -59,10 +59,10 @@
 };
 
 \node[stage=sp, right=0.65cm of s3] (s4) {
-  \textbf{PIM Row Sparsity}\\[2pt]
-  2/3 rows off\\
-  ADC7 + digital BN\\
-  current tuning
+  \textbf{PIM-QAT}\\[2pt]
+  dense N=144 tile\\
+  ADC7, no noise\\
+  paper setting
 };
 
 \node[stage=sp, below=1.15cm of s1] (s5) {
@@ -117,7 +117,8 @@ Phase & Experiment & Precision / path & Acc. (\%) & Notes \\
 2 & RAW/RGGB W4A4 SS + PACT & uniform I16/W4/A4 INT sim & 60.01 & Rerun with \texttt{qkd\_use\_lutq=False}; gain comes from PACT/I16 and simulator alignment, not non-uniform codebook. \\
 3 & QKD CS + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & 61.24 & Co-studying result from simulator. \\
 3 & QKD TU + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & \textbf{61.66} & Current best dense int4 simulator result. \\
-4 & PIM-QAT BN-only & spec W4/A4/ADC7 & 49.63 & First completed PIM row-sparse run; target is 57--58, needs tuning. \\
+4 & PIM row-sparse first run & spec W4/A4/ADC7 & 49.63 & Older sparse-tile setting with 48/144 rows, kept only as a baseline. \\
+4 & PIM-QAT dense N144 & paper W4/A4/ADC7 simulator & 56.75 & Self-study from FP32, uniform W4 + PACT, 7-bit ADC, N=144, no noise; GPU forward best was 56.88. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -153,9 +154,9 @@ Item & Current setting \\
 Model & ALL-CNN-C, 4-channel RGGB input, BatchNorm; GBN and PCN disabled for the minimal pass. \\
 Weights & Uniform 4-bit with deployed integer code range $[-7,\ldots,7]$ and precomputed per-output-channel scales. \\
 Activations & First layer input is unsigned I16; hidden activations are unsigned A4 codes in $[0,15]$ and values in $[0,1]$. \\
-Rows & Stage1.0 and logits are unmasked. Masked layers keep 48/144 rows; stage1.1 hybrid keeps 72/144 rows. \\
-ADC & 7-bit mid-rise tile ADC, fixed window $W=K$, no read noise in the current training run. \\
-Simulator & PIM-QAT forward and PIM simulator are numerically matched on smoke tests; deployed inference uses integer weights/activations and precomputed constants. \\
+Tile & Hidden PIM layers use dense N=144 tiles. Stage1.0 and logits stay digital for this pass. \\
+ADC & 7-bit paper PIM quantizer for bit-serial partial sums, forward scale 1.03, no read noise. \\
+Simulator & Full test uses the PIM simulator with integer weights, integer activations, precomputed scales, and no runtime \texttt{tanh}. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -163,9 +164,9 @@ Simulator & PIM-QAT forward and PIM simulator are numerically matched on smoke t
 \section*{Next}
 
 \begin{enumerate}
-  \item Improve Phase 4 PIM-QAT accuracy from the current 49.63\% toward 57--58\%.
-  \item Add the \texttt{pim\_info/harware\_model.tex} voltage-domain readout as an optional hardware simulator once F/G/H and noise parameters are specified.
-  \item Add PCN only after the minimal BN row-sparse PIM path is stable.
+  \item Improve Phase 4 dense PIM-QAT beyond the current 56.75\% simulator result.
+  \item Add the \texttt{pim\_info/harware\_model.tex} voltage-domain readout once F/G/H and noise parameters are fixed.
+  \item Add PCN only after the minimal BN PIM path is stable.
 \end{enumerate}
 
 \end{document}
