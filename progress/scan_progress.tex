@@ -117,7 +117,6 @@ Phase & Experiment & Precision / path & Acc. (\%) & Notes \\
 2 & RAW/RGGB W4A4 SS + PACT & uniform I16/W4/A4 INT sim & 60.01 & Rerun with \texttt{qkd\_use\_lutq=False}; gain comes from PACT/I16 and simulator alignment, not non-uniform codebook. \\
 3 & QKD CS + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & 61.24 & Co-studying result from simulator. \\
 3 & QKD TU + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & \textbf{61.66} & Current best dense int4 simulator result. \\
-4 & PIM row-sparse first run & spec W4/A4/ADC7 & 49.63 & Older sparse-tile setting with 48/144 rows, kept only as a baseline. \\
 4 & PIM-QAT dense N144 & paper W4/A4/ADC7 simulator & 56.75 & Self-study from FP32, uniform W4 + PACT, 7-bit ADC, N=144, no noise; GPU forward best was 56.88. \\
 \bottomrule
 \end{tabularx}
