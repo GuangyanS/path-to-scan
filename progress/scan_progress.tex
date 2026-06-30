@@ -115,10 +115,12 @@ Phase & Experiment & Precision / path & Acc. (\%) & Notes \\
 1 & RAW/RGGB AllCNN-C & FP32 float & 61.31 & Current 4-channel RGGB BN baseline, \texttt{raw\_noise=True}. \\
 2 & RAW/RGGB W4A4 SS & uniform W4A4 INT sim & 56.61 & Main noisy self-studying baseline; use uniform path going forward. \\
 2 & RAW/RGGB W4A4 SS + PACT & uniform I16/W4/A4 INT sim & 60.01 & Uniform path with LUT-Q disabled; gain comes from PACT/I16 and simulator alignment. \\
-3 & QKD CS + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & 61.24 & Co-studying result from simulator. \\
-3 & QKD TU + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & \textbf{61.66} & Current best dense int4 simulator result. \\
+3 & QKD CS + PACT & I16/W4/A4 LUT-Q $m=15$ & 61.39 & Non-PIM reference; integer LUT weights are not the uniform $[-7,7]$ PIM target. \\
+3 & QKD TU + PACT & I16/W4/A4 LUT-Q $m=15$ & 61.82 & Non-PIM reference; best dense int4 simulator result, not used as the PIM baseline. \\
 4 & PIM-QAT dense N144 & paper W4/A4/ADC7 simulator & 56.75 & Self-study from FP32, uniform W4 + PACT, 7-bit ADC, N=144, no noise; GPU forward best was 56.88. \\
-4 & PIM-QAT dense N144, Phase 2 init & paper W4/A4/ADC7 simulator & 58.80 & Initialized from Phase 2 uniform I16/W4/A4 + PACT checkpoint; best GPU forward was 58.66 at epoch 2. \\
+4 & PIM-QAT dense N144, Phase 2 init & paper W4/A4/ADC7 simulator & \textbf{58.80} & Active uniform PIM baseline; initialized from Phase 2 uniform I16/W4/A4 + PACT checkpoint. \\
+4 & PIM-QKD CS controlled & paper W4/A4/ADC7 simulator & 58.28 & Started from the active PIM baseline; best CS full-simulator result did not improve over Phase 2 init. \\
+4 & PIM-QKD TU controlled & paper W4/A4/ADC7 simulator & 58.13 & Started from controlled PIM-CS; GPU forward reached 58.75, but full simulator remained below baseline. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -136,8 +138,10 @@ EfficientNetV2-L teacher, clean & 77.30 & Verified on current H5 test split. \\
 EfficientNetV2-L teacher, noisy & 77.33 & Default noisy evaluation. \\
 Co-studied teacher, noisy & 78.70 & Earlier CS run improved teacher. \\
 Uniform SS + PACT rerun & 60.01 & I16/W4/A4, \texttt{qkd\_use\_lutq=False}, fixed integer simulator. \\
-QKD CS rerun & 61.24 & I16/W4/A4 equal-spaced LUT-Q + PACT, fixed simulator. \\
-QKD TU rerun & 61.66 & Best current dense int4 simulator result. \\
+QKD CS rerun & 61.39 & I16/W4/A4 LUT-Q $m=15$ + PACT; non-PIM reference. \\
+QKD TU rerun & 61.82 & Best non-PIM dense int4 simulator reference. \\
+PIM-QKD CS, controlled & 58.28 & Full PIM simulator; uniform $[-7,7]$, A4, I16 input, ADC7/N144. \\
+PIM-QKD TU, controlled & 58.13 & Full PIM simulator; started from controlled PIM-CS. \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -164,7 +168,8 @@ Simulator & Full test uses the PIM simulator with integer weights, integer activ
 \section*{Next}
 
 \begin{enumerate}
-  \item Use the 58.80\% dense N144 PIM-QAT checkpoint as the minimal PIM baseline.
+  \item Use the 58.80\% dense N144 PIM-QAT checkpoint as the current minimal uniform PIM baseline.
+  \item Keep QKD results separated by constraint: LUT-Q $m=15$ is a non-PIM reference; uniform $[-7,7]$ PIM-QKD did not improve this run.
   \item Add the \texttt{pim\_info/harware\_model.tex} voltage-domain readout once F/G/H and noise parameters are fixed.
   \item Add PCN only after the minimal BN PIM path is stable.
 \end{enumerate}

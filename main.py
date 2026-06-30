@@ -526,6 +526,13 @@ def load_fp32_init_for_qat(model):
     model.testacc_pre_epoch = []
 
 
+def reset_checkpoint_history(model):
+    model.epoch = 0
+    model.lr_pre_epoch = []
+    model.loss_pre_epoch = []
+    model.testacc_pre_epoch = []
+
+
 def qat_finetune(**kwargs):
     opt.parse(kwargs)
     set_seed(opt.seed)
@@ -658,6 +665,7 @@ def qkd_finetune(**kwargs):
     else:
         student_checkpoint = qkd_default_student_checkpoint(stage)
         load_qat_checkpoint(student, student_checkpoint)
+        reset_checkpoint_history(student)
         print('loaded QKD student from %s'
               % resolve_checkpoint_path(student_checkpoint))
     student.to(device)
