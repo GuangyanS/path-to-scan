@@ -536,7 +536,10 @@ def qat_finetune(**kwargs):
     device = get_device()
 
     model = make_qat_model()
-    load_fp32_init_for_qat(model)
+    if opt.checkpoint_load_name:
+        load_qat_checkpoint(model, opt.checkpoint_load_name)
+    else:
+        load_fp32_init_for_qat(model)
     model.to(device)
 
     check_acc(loader_test, model, device, name='initial 4W4A test')

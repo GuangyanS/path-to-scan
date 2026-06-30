@@ -107,17 +107,18 @@
 \begin{table}[h]
 \centering
 \small
-\begin{tabularx}{\linewidth}{@{}l l l r X@{}}
+\begin{tabularx}{\linewidth}{@{}c >{\raggedright\arraybackslash}p{0.21\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} r >{\raggedright\arraybackslash}X@{}}
 \toprule
 Phase & Experiment & Precision / path & Acc. (\%) & Notes \\
 \midrule
-1 & RGB AllCNN-C + BN & FP32 float & 72.99 & Standard CIFAR-100 RGB, $3\times32\times32$, crop/flip augmentation; \texttt{checkpoints/ALL\_CNN\_C\_c100\_rgb\_aug\_bn\_refstyle.pth}. \\
+1 & RGB AllCNN-C + BN & FP32 float & 72.99 & Standard CIFAR-100 RGB, $3\times32\times32$, crop/flip augmentation. \\
 1 & RAW/RGGB AllCNN-C & FP32 float & 61.31 & Current 4-channel RGGB BN baseline, \texttt{raw\_noise=True}. \\
 2 & RAW/RGGB W4A4 SS & uniform W4A4 INT sim & 56.61 & Main noisy self-studying baseline; use uniform path going forward. \\
-2 & RAW/RGGB W4A4 SS + PACT & uniform I16/W4/A4 INT sim & 60.01 & Rerun with \texttt{qkd\_use\_lutq=False}; gain comes from PACT/I16 and simulator alignment, not non-uniform codebook. \\
+2 & RAW/RGGB W4A4 SS + PACT & uniform I16/W4/A4 INT sim & 60.01 & Uniform path with LUT-Q disabled; gain comes from PACT/I16 and simulator alignment. \\
 3 & QKD CS + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & 61.24 & Co-studying result from simulator. \\
 3 & QKD TU + PACT & I16/W4/A4 equal-spaced LUT-Q $m=15$ & \textbf{61.66} & Current best dense int4 simulator result. \\
 4 & PIM-QAT dense N144 & paper W4/A4/ADC7 simulator & 56.75 & Self-study from FP32, uniform W4 + PACT, 7-bit ADC, N=144, no noise; GPU forward best was 56.88. \\
+4 & PIM-QAT dense N144, Phase 2 init & paper W4/A4/ADC7 simulator & 58.80 & Initialized from Phase 2 uniform I16/W4/A4 + PACT checkpoint; best GPU forward was 58.66 at epoch 2. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -163,7 +164,7 @@ Simulator & Full test uses the PIM simulator with integer weights, integer activ
 \section*{Next}
 
 \begin{enumerate}
-  \item Improve Phase 4 dense PIM-QAT beyond the current 56.75\% simulator result.
+  \item Use the 58.80\% dense N144 PIM-QAT checkpoint as the minimal PIM baseline.
   \item Add the \texttt{pim\_info/harware\_model.tex} voltage-domain readout once F/G/H and noise parameters are fixed.
   \item Add PCN only after the minimal BN PIM path is stable.
 \end{enumerate}
